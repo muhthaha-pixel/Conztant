@@ -1,0 +1,10 @@
+# OS / editor
+Thumbs.db
+.DS_Store
+*.bmp
+.vscode/
+.idea/
+
+# Firebase CLI (only if you later use Firebase Hosting)
+.firebase/
+firebase-debug.log
