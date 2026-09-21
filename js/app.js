@@ -57,6 +57,7 @@ function icon(name){
     trash:'<path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0-.8 12.2a2 2 0 0 1-2 1.8H9.8a2 2 0 0 1-2-1.8L7 7"/>',
     edit:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
     clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
+    inbox:'<path d="M12 3v10"/><path d="M8 9l4 4 4-4"/><path d="M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/>',
     book:'<path d="M4 4h6a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H4Z"/><path d="M20 4h-6a3 3 0 0 0-3 3v13a2 2 0 0 1 2-2h7Z"/>',
   };
   return '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+(paths[name]||'')+'</svg>';
@@ -139,7 +140,10 @@ function openCreditorLedgerModal(creditor){
       <p style="font-size:13px;color:var(--text-muted);margin:0 0 12px;">Outstanding balance: <strong class="mono">${money(creditor.balance||0)}</strong></p>
       <div class="table-wrap" style="max-height:320px;overflow-y:auto;">
         <table><thead><tr><th>Date</th><th class="num">Amount</th><th>Note</th><th></th></tr></thead>
-        <tbody id="clTbody">${payments.length? payments.map(p=>`<tr data-id="${p.id}">
+        <tbody id="clTbody">${payments.length? payments.map(p=> p.receiptId ? `<tr data-id="${p.id}">
+          <td>${fmtDateLabel(p.date)}</td><td class="num">${money(p.amount)}</td><td>${esc(p.note||'')}</td>
+          <td><span class="hint" style="font-size:11.5px;color:var(--text-faint);">via Receipts — edit there</span></td>
+        </tr>` : `<tr data-id="${p.id}">
           <td><input type="date" class="clDate" value="${p.date||''}" style="width:130px;"></td>
           <td class="num"><input type="number" step="0.01" class="clAmt" value="${p.amount||0}" style="width:90px;text-align:right;"></td>
           <td><input type="text" class="clNote" value="${esc(p.note||'')}" style="width:120px;"></td>
@@ -464,8 +468,8 @@ function loadTodayLog(){
 // no server-side rule layer behind the db capability, so this is a front-door convenience for a
 // shared terminal, not a hard security boundary. See the login screen's own note to the owner.
 const ROLE_TABS = {
-  owner:   ['dashboard','shift','stock','expenses','salary','reports','journal','activity','setup'],
-  manager: ['dashboard','shift','stock','expenses','salary','reports','journal'],
+  owner:   ['dashboard','shift','stock','expenses','salary','reports','receipts','journal','activity','setup'],
+  manager: ['dashboard','shift','stock','expenses','salary','reports','receipts','journal'],
   staff:   ['dashboard','shift'],
 };
 const ROLE_LABEL = {owner:'Owner', manager:'Manager', staff:'Staff'};
@@ -707,6 +711,7 @@ const NAV = [
   {id:'expenses', label:'Expenses', icon:'receipt'},
   {id:'salary', label:'Salary', icon:'wallet'},
   {id:'reports', label:'Reports', icon:'chart'},
+  {id:'receipts', label:'Receipts', icon:'inbox'},
   {id:'journal', label:'Journal', icon:'book'},
   {id:'activity', label:'Activity Log', icon:'clock'},
   {id:'setup', label:'Setup', icon:'gear'},
@@ -760,6 +765,7 @@ function renderCurrentView(){
     case 'expenses': renderExpenses(mount); break;
     case 'salary': renderSalary(mount); break;
     case 'reports': renderReports(mount); break;
+    case 'receipts': renderReceipts(mount); break;
     case 'journal': renderJournal(mount); break;
     case 'activity': renderActivityLog(mount); break;
     case 'setup': renderSetup(mount); break;
@@ -1971,6 +1977,7 @@ async function loadReportBody(){
   const expData = await getMonthDoc('expensesMonthly', monthId);
   const salData = await getMonthDoc('salaryMonthly', monthId);
   const jnlData = await getMonthDoc('journalMonthly', monthId);
+  const rcpData = await getMonthDoc('receiptsMonthly', monthId);
   const stockData = await getMonthDoc('stockReceiptsMonthly', monthId);
 
   let revenue=0, oilRevenue=0, ltrTotal=0;
@@ -1996,7 +2003,7 @@ async function loadReportBody(){
   const grossMargin = revenue - fuelCost;
   const expenses = (expData && expData.total) || 0;
   const salary = (salData && salData.totalAccrued) || 0;
-  const jnl = journalPL(jnlData);
+  const jnl = journalPL(jnlData, rcpData);
   const net = grossMargin - expenses - salary + jnl.income - jnl.expense;
 
   body.innerHTML = `
@@ -2010,8 +2017,8 @@ async function loadReportBody(){
       <div class="card kpi"><div class="label">Gross margin</div><div class="value ${grossMargin>=0?'good':'critical'}">${moneyShort(grossMargin)}</div></div>
       <div class="card kpi"><div class="label">Expenses</div><div class="value">${moneyShort(expenses)}</div></div>
       <div class="card kpi"><div class="label">Salary</div><div class="value">${moneyShort(salary)}</div></div>
-      <div class="card kpi"><div class="label">Other income</div><div class="value">${moneyShort(jnl.income)}</div><div class="foot">from journal</div></div>
-      <div class="card kpi"><div class="label">Other expenses</div><div class="value">${moneyShort(jnl.expense)}</div><div class="foot">from journal</div></div>
+      <div class="card kpi"><div class="label">Other income</div><div class="value">${moneyShort(jnl.income)}</div><div class="foot">journal + receipts</div></div>
+      <div class="card kpi"><div class="label">Other expenses</div><div class="value">${moneyShort(jnl.expense)}</div><div class="foot">journal + receipts</div></div>
       <div class="card kpi"><div class="label">Net P&amp;L</div><div class="value ${net>=0?'good':'critical'}">${moneyShort(net)}</div></div>
     </div>
 
@@ -2053,14 +2060,14 @@ async function loadReportBody(){
   drawTrendChart($('#chartTrend'), byDay, monthId, dim);
   const exportBtn = $('#repExport');
   if (exportBtn && window.XLSX) exportBtn.onclick = ()=>exportReportExcel({
-    monthId, dayDocs, expData, salData, stockData, jnlData, byProduct, payTotals,
+    monthId, dayDocs, expData, salData, stockData, jnlData, rcpData, byProduct, payTotals,
     summary: {fuelRevenue, oilRevenue, revenue, ltrTotal, fuelCost, grossMargin, expenses, salary, otherIncome:jnl.income, otherExpense:jnl.expense, net},
   });
 }
 
 // Builds a multi-sheet .xlsx for the month entirely in the browser (SheetJS) and triggers the
 // download. Numbers are written as numbers (not formatted strings) so Excel can total them.
-function exportReportExcel({monthId, dayDocs, expData, salData, stockData, jnlData, byProduct, payTotals, summary}){
+function exportReportExcel({monthId, dayDocs, expData, salData, stockData, jnlData, rcpData, byProduct, payTotals, summary}){
   const r2 = (n)=> Math.round(num(n)*100)/100;
   const wb = XLSX.utils.book_new();
   const addSheet = (name, rows, widths)=>{
@@ -2161,6 +2168,12 @@ function exportReportExcel({monthId, dayDocs, expData, salData, stockData, jnlDa
     ['Date', 'Debit (Dr)', 'Credit (Cr)', 'Amount (₹)', 'Narration', 'By'],
     ...jnl.map(it=>[it.date, targetLabel(it.debit)||it.debitLabel||'', targetLabel(it.credit)||it.creditLabel||'', r2(it.amount), it.narration||'', it.by||'']),
   ], [12, 28, 28, 12, 36, 14]);
+
+  const rcp = ((rcpData&&rcpData.items)||[]).slice().sort((a,b)=>a.date.localeCompare(b.date));
+  addSheet('Receipts', [
+    ['Date', 'From', 'Type', 'Amount (₹)', 'Into', 'Mode', 'Reference', 'Narration', 'Ledger', 'By'],
+    ...rcp.map(it=>[it.date, receiptFromLabel(it), it.type==='creditor'?'Creditor':'Other', r2(it.amount), it.into==='cash'?'Cash in hand':((state.accounts.find(a=>'acct:'+a.id===it.into)||{}).name||''), it.mode||'', it.reference||'', it.narration||'', targetLabel(it.ledger)||'', it.by||'']),
+  ], [12, 24, 10, 12, 18, 12, 14, 30, 22, 14]);
 
   // 8. Current balances (as of export time)
   addSheet('Balances', [
@@ -2298,7 +2311,7 @@ async function applyJournalItem(item, sign){
   await applyPosting(item.credit, -amt, meta);
 }
 // P&L effect of a month's journal: income = net credits to income ledgers, expense = net debits to expense ledgers.
-function journalPL(journalData){
+function journalPL(journalData, receiptsData){
   let income=0, expense=0;
   const groupOf = (key)=>{ if (!key || !key.startsWith('led:')) return null; const l = state.ledgers.find(x=>x.id===key.slice(4)); return l ? l.group : null; };
   ((journalData&&journalData.items)||[]).forEach(it=>{
@@ -2306,6 +2319,10 @@ function journalPL(journalData){
     const dg = groupOf(it.debit), cg = groupOf(it.credit);
     if (dg==='income') income -= a; if (cg==='income') income += a;
     if (dg==='expense') expense += a; if (cg==='expense') expense -= a;
+  });
+  ((receiptsData&&receiptsData.items)||[]).forEach(it=>{
+    const g = groupOf(it.ledger); const a = num(it.amount);
+    if (g==='income') income += a; if (g==='expense') expense -= a;
   });
   return {income, expense};
 }
@@ -2486,6 +2503,189 @@ async function loadJournalList(){
   $$('#jeList [data-edit]').forEach(b=>b.onclick=()=>{ const it = items.find(x=>x.id===b.dataset.edit); if (it) editJournalEntry(monthId, it); });
   $$('#jeList [data-rm]').forEach(b=>b.onclick=()=>{ const it = items.find(x=>x.id===b.dataset.rm); if (it) removeJournalEntry(monthId, it); });
   wireMonthSwitcher(()=>{ loadJournalList(); });
+}
+
+/* ============================== RECEIPTS ============================== */
+// Money received by the station. A creditor receipt reduces that creditor's outstanding balance
+// (and appears in their payment history); an "other" receipt is a manual entry from any party,
+// optionally credited to a ledger (e.g. an Income ledger so it reaches the P&L). Either way the
+// money lands in Cash in hand or a bank account. Stored per month in receiptsMonthly.
+const RECEIPT_MODES = ['Cash','UPI','Bank transfer','Cheque','Card'];
+function receiptIntoOptions(sel){
+  const opts = [{key:'cash', label:'Cash in hand'}].concat(state.accounts.filter(a=>a.kind==='bank' && a.active!==false).map(a=>({key:'acct:'+a.id, label:a.name})));
+  return opts.map(o=>`<option value="${o.key}" ${o.key===sel?'selected':''}>${esc(o.label)}</option>`).join('');
+}
+function receiptLedgerOptions(sel){
+  return `<option value="">— none —</option>` + state.ledgers.filter(l=>l.active!==false && !l.cashInHand).map(l=>`<option value="led:${l.id}" ${('led:'+l.id)===sel?'selected':''}>${esc(l.name)} (${esc((LEDGER_GROUPS[l.group]||{}).label||'')})</option>`).join('');
+}
+function receiptFromLabel(it){
+  if (it.type==='creditor'){ const c = state.creditors.find(x=>x.id===it.creditorId); return c ? c.name : (it.creditorName||'—'); }
+  return it.fromName || '—';
+}
+// sign +1 applies the receipt's effects, -1 reverses them.
+async function applyReceipt(item, sign){
+  const amt = num(item.amount) * sign;
+  if (!amt) return;
+  const meta = {date:item.date, narration:'Receipt from '+receiptFromLabel(item)+(item.narration?' — '+item.narration:''), journalId:item.id};
+  // Where the money went: debit cash / bank.
+  await applyPosting(item.into||'cash', amt, meta);
+  if (item.type==='creditor' && item.creditorId){
+    const ref = state.db.doc('creditors/'+item.creditorId);
+    const snap = await ref.get();
+    if (snap.exists){
+      const data = snap.data();
+      let payments = (data.payments||[]).filter(p=>p.receiptId!==item.id);
+      if (sign>0) payments = payments.concat([{id:uid(), receiptId:item.id, date:item.date, amount:num(item.amount), note:[item.mode, item.reference, item.narration].filter(Boolean).join(' · '), savedAt:new Date().toISOString()}]);
+      await ref.update({payments, balance: num(data.balance) - amt});
+      const c = state.creditors.find(x=>x.id===item.creditorId); if (c) c.balance = num(c.balance) - amt;
+    }
+  } else if (item.ledger){
+    // Credit the chosen ledger (income → P&L, receivable → reduces what's owed, etc.)
+    await applyPosting(item.ledger, -amt, meta);
+  }
+}
+
+function renderReceipts(mount){
+  mount.innerHTML = `
+    <h1 class="page-title">Receipts</h1>
+    <p class="page-sub">Money received — from credit customers (their outstanding balance is adjusted automatically) or from anyone else as a manual entry.</p>
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <div class="form-grid">
+        <div class="field"><label>Date</label><input type="date" id="rcDate" value="${todayStr()}" max="${todayStr()}"></div>
+        <div class="field"><label>Received from</label><select id="rcType"><option value="creditor">Creditor (credit customer)</option><option value="other">Other party (manual)</option></select></div>
+        <div class="field" id="rcCreditorWrap"><label>Creditor</label><select id="rcCreditor"><option value="">Select creditor…</option>${state.creditors.filter(c=>c.active!==false).map(c=>`<option value="${c.id}">${esc(c.name)} — ${money(c.balance||0)} due</option>`).join('')}</select></div>
+        <div class="field" id="rcFromWrap" style="display:none;"><label>Party name</label><input type="text" id="rcFrom" placeholder="e.g. Rent from tenant / Insurance claim"></div>
+        <div class="field" id="rcLedgerWrap" style="display:none;"><label>Credit to ledger (optional)</label><select id="rcLedger">${receiptLedgerOptions('')}</select></div>
+        <div class="field"><label>Amount (₹)</label><input type="number" step="0.01" id="rcAmt" placeholder="0.00"></div>
+        <div class="field"><label>Received into</label><select id="rcInto">${receiptIntoOptions('cash')}</select></div>
+        <div class="field"><label>Mode</label><select id="rcMode">${RECEIPT_MODES.map(m=>`<option>${m}</option>`).join('')}</select></div>
+        <div class="field"><label>Reference (cheque / UTR no.)</label><input type="text" id="rcRef" placeholder="Optional"></div>
+        <div class="field" style="grid-column:span 2;"><label>Narration</label><input type="text" id="rcNarr" placeholder="Optional"></div>
+        <div class="field"><button class="btn primary" id="rcSave" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Save receipt</button></div>
+      </div>
+      <div class="hint" style="color:var(--text-faint);font-size:12px;">For "Other party", pick an <strong>Income</strong> ledger to count the receipt in the P&amp;L, or an <strong>Asset / Receivable</strong> ledger when it settles an amount that was owed. Leave it as "none" for a plain cash/bank receipt.</div>
+      <div id="rcMsg" style="font-size:13px;margin-top:4px;"></div>
+    </div>
+    <div class="section-head"><h2>Receipts</h2><span id="rcMonthLabel"></span></div>
+    <div id="rcList"></div>
+  `;
+  const syncType = ()=>{
+    const other = $('#rcType').value==='other';
+    $('#rcCreditorWrap').style.display = other ? 'none' : '';
+    $('#rcFromWrap').style.display = other ? '' : 'none';
+    $('#rcLedgerWrap').style.display = other ? '' : 'none';
+  };
+  $('#rcType').onchange = syncType; syncType();
+  $('#rcSave').onclick = addReceipt;
+  loadReceiptsList();
+}
+
+async function addReceipt(){
+  const msg = $('#rcMsg');
+  const type = $('#rcType').value;
+  const item = {
+    id:uid(), date:$('#rcDate').value, type,
+    creditorId: type==='creditor' ? $('#rcCreditor').value : '',
+    creditorName: '', fromName: type==='other' ? $('#rcFrom').value.trim() : '',
+    ledger: type==='other' ? $('#rcLedger').value : '',
+    amount:num($('#rcAmt').value), into:$('#rcInto').value, mode:$('#rcMode').value,
+    reference:$('#rcRef').value.trim(), narration:$('#rcNarr').value.trim(),
+    by: state.currentUser?state.currentUser.name:'', savedAt:new Date().toISOString(),
+  };
+  if (!state.dbReady){ msg.innerHTML = `<span style="color:var(--critical)">Live data isn't connected.</span>`; return; }
+  if (type==='creditor' && !item.creditorId){ msg.innerHTML = `<span style="color:var(--critical)">Select the creditor.</span>`; return; }
+  if (type==='other' && !item.fromName){ msg.innerHTML = `<span style="color:var(--critical)">Enter who the money was received from.</span>`; return; }
+  if (!(item.amount>0)){ msg.innerHTML = `<span style="color:var(--critical)">Enter an amount.</span>`; return; }
+  if (type==='creditor'){ const c = state.creditors.find(x=>x.id===item.creditorId); item.creditorName = c ? c.name : ''; }
+  $('#rcSave').disabled = true;
+  try{
+    const monthId = monthIdOf(item.date);
+    const data = (await getMonthDoc('receiptsMonthly', monthId)) || {items:[]};
+    data.items = (data.items||[]).concat([item]);
+    await setMonthDoc('receiptsMonthly', monthId, data);
+    await applyReceipt(item, +1);
+    await logActivity({entity:'Receipt', entityLabel:receiptFromLabel(item), action:'add', summary:`Received ${money(item.amount)} by ${item.mode}`});
+    msg.innerHTML = `<span style="color:var(--good)">Receipt saved${type==='creditor'?' — creditor balance updated':''}.</span>`;
+    renderReceipts($('#viewMount'));
+    $('#rcMsg').innerHTML = `<span style="color:var(--good)">Receipt saved${type==='creditor'?' — creditor balance updated':''}.</span>`;
+  }catch(e){ msg.innerHTML = `<span style="color:var(--critical)">Couldn't save: ${esc(e.message||'error')}</span>`; const b=$('#rcSave'); if (b) b.disabled=false; }
+}
+
+async function removeReceipt(monthId, item){
+  const ok = await confirmModal({title:'Delete this receipt?', body: item.type==='creditor' ? "This removes it and adds the amount back to the creditor's outstanding balance." : 'This removes it and reverses its effect on the cash / bank balance.', confirmLabel:'Delete receipt'});
+  if (!ok) return;
+  const data = await getMonthDoc('receiptsMonthly', monthId);
+  if (!data) return;
+  data.items = (data.items||[]).filter(i=>i.id!==item.id);
+  await setMonthDoc('receiptsMonthly', monthId, data);
+  await applyReceipt(item, -1);
+  await logActivity({entity:'Receipt', entityLabel:receiptFromLabel(item), action:'delete', summary:`Removed ${money(item.amount)}`});
+  renderReceipts($('#viewMount'));
+}
+
+function editReceipt(monthId, item){
+  const intoOpts = [{value:'cash', label:'Cash in hand'}].concat(state.accounts.filter(a=>a.kind==='bank').map(a=>({value:'acct:'+a.id, label:a.name})));
+  const fields = [
+    {key:'date', label:'Date', type:'date'},
+    ...(item.type==='creditor'
+      ? [{key:'creditorId', label:'Creditor', type:'select', options:state.creditors.map(c=>({value:c.id,label:c.name})), fmt:v=>{ const c=state.creditors.find(x=>x.id===v); return c?c.name:(v||'—'); }}]
+      : [{key:'fromName', label:'Party name', type:'text'}, {key:'ledger', label:'Credit to ledger', type:'select', options:[{value:'',label:'— none —'}].concat(state.ledgers.filter(l=>!l.cashInHand).map(l=>({value:'led:'+l.id,label:l.name}))), fmt:v=>targetLabel(v)||'—'}]),
+    {key:'amount', label:'Amount (₹)', type:'number', fmt:v=>money(v)},
+    {key:'into', label:'Received into', type:'select', options:intoOpts, fmt:v=>(intoOpts.find(o=>o.value===v)||{}).label||v},
+    {key:'mode', label:'Mode', type:'select', options:RECEIPT_MODES.map(m=>({value:m,label:m}))},
+    {key:'reference', label:'Reference', type:'text'},
+    {key:'narration', label:'Narration', type:'text'},
+  ];
+  openLineEditModal({
+    title:'Edit receipt', fields, values:item,
+    onSave: async (out)=>{
+      if (!state.dbReady) throw new Error("Live data isn't connected.");
+      if (!(num(out.amount)>0)) throw new Error('Enter an amount.');
+      if (item.type==='creditor' && !out.creditorId) throw new Error('Select the creditor.');
+      const changes = diffFields(fields, item, out);
+      const newItem = Object.assign({}, item, out);
+      if (newItem.type==='creditor'){ const c = state.creditors.find(x=>x.id===newItem.creditorId); newItem.creditorName = c ? c.name : ''; }
+      const newMonth = monthIdOf(out.date);
+      await applyReceipt(item, -1);
+      const oldData = await getMonthDoc('receiptsMonthly', monthId);
+      if (oldData){ oldData.items = (oldData.items||[]).filter(i=>i.id!==item.id); await setMonthDoc('receiptsMonthly', monthId, oldData); }
+      const newData = (newMonth===monthId && oldData) ? oldData : ((await getMonthDoc('receiptsMonthly', newMonth)) || {items:[]});
+      newData.items = (newData.items||[]).concat([newItem]);
+      await setMonthDoc('receiptsMonthly', newMonth, newData);
+      await applyReceipt(newItem, +1);
+      if (changes.length) await logActivity({entity:'Receipt', entityLabel:receiptFromLabel(newItem), action:'edit', changes});
+      renderReceipts($('#viewMount'));
+    }
+  });
+}
+
+async function loadReceiptsList(){
+  const el = $('#rcList'); if(!el) return;
+  el.innerHTML = `<div class="card empty">Loading…</div>`;
+  const monthId = state.activeMonth;
+  $('#rcMonthLabel') && ($('#rcMonthLabel').innerHTML = monthSwitcherHtml());
+  const data = await getMonthDoc('receiptsMonthly', monthId);
+  const items = ((data&&data.items)||[]).slice().sort((a,b)=>b.date.localeCompare(a.date) || (b.savedAt||'').localeCompare(a.savedAt||''));
+  const total = items.reduce((s,i)=>s+num(i.amount),0);
+  const intoLabel = (k)=> k==='cash' ? 'Cash in hand' : ((state.accounts.find(a=>'acct:'+a.id===k)||{}).name || k || '—');
+  el.innerHTML = `<div class="card"><div class="table-wrap"><table>
+    <thead><tr><th>Date</th><th>From</th><th>Type</th><th class="num">Amount</th><th>Into</th><th>Mode</th><th>Reference / narration</th><th>By</th><th></th></tr></thead>
+    <tbody>${items.length? items.map(it=>`<tr>
+      <td style="white-space:nowrap;">${fmtDateLabel(it.date)}</td>
+      <td>${esc(receiptFromLabel(it))}</td>
+      <td><span class="pill ${it.type==='creditor'?'good':'neutral'}">${it.type==='creditor'?'Creditor':'Other'}</span>${it.ledger?`<div class="hint" style="font-size:11px;color:var(--text-faint)">→ ${esc(targetLabel(it.ledger)||'')}</div>`:''}</td>
+      <td class="num">${money(it.amount)}</td>
+      <td>${esc(intoLabel(it.into))}</td>
+      <td>${esc(it.mode||'—')}</td>
+      <td>${esc([it.reference, it.narration].filter(Boolean).join(' · ')||'—')}</td>
+      <td style="white-space:nowrap;">${esc(it.by||'—')}</td>
+      <td style="white-space:nowrap;"><button class="btn ghost sm" data-edit="${it.id}">${icon('edit')}</button> <button class="btn ghost sm" data-rm="${it.id}">${icon('trash')}</button></td>
+    </tr>`).join('') : `<tr><td colspan="9" class="empty">No receipts for ${monthLabel(monthId)}.</td></tr>`}</tbody>
+    ${items.length?`<tfoot><tr><td colspan="3" style="font-weight:700;">Total</td><td class="num" style="font-weight:700;">${money(total)}</td><td colspan="5"></td></tr></tfoot>`:''}
+  </table></div></div>`;
+  $$('#rcList [data-edit]').forEach(b=>b.onclick=()=>{ const it = items.find(x=>x.id===b.dataset.edit); if (it) editReceipt(monthId, it); });
+  $$('#rcList [data-rm]').forEach(b=>b.onclick=()=>{ const it = items.find(x=>x.id===b.dataset.rm); if (it) removeReceipt(monthId, it); });
+  wireMonthSwitcher(()=>{ loadReceiptsList(); });
 }
 
 /* ============================== SETUP ============================== */
