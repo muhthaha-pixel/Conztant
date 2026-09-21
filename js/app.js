@@ -1963,117 +1963,357 @@ async function loadActivityLog(){
 }
 
 /* ============================== REPORTS / P&L ============================== */
-async function renderReports(mount){
-  mount.innerHTML = `
-    <h1 class="page-title">Monthly P&amp;L</h1>
-    <p class="page-sub" id="repMonthLabel"></p>
-    <div id="repBody"><div class="card empty">Crunching the numbers…</div></div>
-  `;
-  $('#repMonthLabel').innerHTML = monthSwitcherHtml();
-  wireMonthSwitcher(()=>renderReports(mount));
-  await loadReportBody();
+// Report builder: any date range (presets or custom), optional comparison period, filters
+// (staff / product / nozzle / creditor / payment method) and a pick-list of sections. The same
+// configuration drives the on-screen report and the Excel export. Settings are remembered per
+// browser in localStorage as a convenience.
+const REPORT_SECTIONS = [
+  {id:'summary',     label:'P&L summary'},
+  {id:'balances',    label:'Cash & bank balances'},
+  {id:'products',    label:'Sales by product'},
+  {id:'trend',       label:'Daily revenue trend'},
+  {id:'collections', label:'Collections by method'},
+  {id:'duties',      label:'Duties list'},
+  {id:'credit',      label:'Credit sales'},
+  {id:'oils',        label:'Oil sales'},
+  {id:'purchases',   label:'Fuel purchases'},
+  {id:'expenses',    label:'Expenses'},
+  {id:'salary',      label:'Salary'},
+  {id:'journal',     label:'Journal entries'},
+  {id:'receipts',    label:'Receipts'},
+];
+const REPORT_CFG_KEY = 'fuelLedgerReportCfg';
+function defaultReportCfg(){
+  return { preset:'thisMonth', from:'', to:'', compare:'none', staff:'', product:'', nozzle:'', creditor:'', method:'',
+           sections: REPORT_SECTIONS.map(s=>s.id) };
+}
+let repCfg = null;
+function loadReportCfg(){
+  if (repCfg) return repCfg;
+  repCfg = defaultReportCfg();
+  try{
+    const saved = JSON.parse(localStorage.getItem(REPORT_CFG_KEY)||'null');
+    if (saved && typeof saved==='object') repCfg = Object.assign(repCfg, saved);
+  }catch(e){}
+  return repCfg;
+}
+function saveReportCfg(){ try{ localStorage.setItem(REPORT_CFG_KEY, JSON.stringify(repCfg)); }catch(e){} }
+
+function addDays(dateStr, n){ const d = new Date(dateStr+'T00:00:00'); d.setDate(d.getDate()+n); return ymd(d); }
+function daysBetween(from, to){ return Math.round((new Date(to+'T00:00:00') - new Date(from+'T00:00:00'))/86400000) + 1; }
+function monthEnd(monthId){ return monthId+'-'+pad2(daysInMonth(monthId)); }
+function monthsBetween(from, to){
+  const out = []; let m = monthIdOf(from); const last = monthIdOf(to);
+  while (m<=last){ out.push(m); m = shiftMonth(m,1); if (out.length>120) break; }
+  return out;
+}
+// Indian financial year: April–March.
+function presetRange(preset){
+  const today = todayStr(); const [y,m] = [Number(today.slice(0,4)), Number(today.slice(5,7))];
+  const thisMonth = monthIdOf(today);
+  switch(preset){
+    case 'thisMonth': return {from:thisMonth+'-01', to:today};
+    case 'lastMonth': { const lm = shiftMonth(thisMonth,-1); return {from:lm+'-01', to:monthEnd(lm)}; }
+    case 'last3': { const s = shiftMonth(thisMonth,-2); return {from:s+'-01', to:today}; }
+    case 'thisQuarter': { const q = Math.floor(((m-4+12)%12)/3); let sm = 4+q*3, sy = y; if (m<4) sy = y-1; if (sm>12){ sm-=12; sy++; } return {from:sy+'-'+pad2(sm)+'-01', to:today}; }
+    case 'fy': { const sy = m>=4 ? y : y-1; return {from:sy+'-04-01', to: (m>=4 ? today : today)}; }
+    case 'lastFy': { const sy = m>=4 ? y-1 : y-2; return {from:sy+'-04-01', to:(sy+1)+'-03-31'}; }
+    default: return null;
+  }
+}
+function comparisonRange(from, to, mode){
+  if (mode==='lastYear'){
+    const shift = (d)=>{ const yy = Number(d.slice(0,4))-1; const rest = d.slice(4); return (rest==='-02-29') ? yy+'-02-28' : yy+rest; };
+    return {from:shift(from), to:shift(to)};
+  }
+  if (mode==='previous'){
+    // Month-aligned ranges step back whole months so "this month vs last month" is exact.
+    const aligned = from.slice(8)==='01' && (to===monthEnd(monthIdOf(to)) || to===todayStr());
+    if (aligned){
+      const n = monthsBetween(from,to).length;
+      const f = shiftMonth(monthIdOf(from), -n);
+      const t = shiftMonth(monthIdOf(to), -n);
+      const toDay = to===todayStr() ? Math.min(Number(to.slice(8)), daysInMonth(t)) : daysInMonth(t);
+      return {from:f+'-01', to:t+'-'+pad2(toDay)};
+    }
+    const n = daysBetween(from,to);
+    return {from:addDays(from,-n), to:addDays(to,-n)};
+  }
+  return null;
+}
+function rangeLabel(from, to){
+  if (from.slice(0,7)===to.slice(0,7) && from.slice(8)==='01' && to===monthEnd(monthIdOf(to))) return monthLabel(monthIdOf(from));
+  return fmtDateLabel(from)+' – '+fmtDateLabel(to);
 }
 
-async function loadReportBody(){
-  const body = $('#repBody'); if(!body) return;
-  const monthId = state.activeMonth;
-  const dim = daysInMonth(monthId);
-
-  const dayDocs = await getMonthDailyLogs(monthId);
-  const expData = await getMonthDoc('expensesMonthly', monthId);
-  const salData = await getMonthDoc('salaryMonthly', monthId);
-  const jnlData = await getMonthDoc('journalMonthly', monthId);
-  const rcpData = await getMonthDoc('receiptsMonthly', monthId);
-  const stockData = await getMonthDoc('stockReceiptsMonthly', monthId);
-
-  let revenue=0, oilRevenue=0, ltrTotal=0;
-  const byProduct = {p1:{liters:0,amount:0}, p2:{liters:0,amount:0}, p3:{liters:0,amount:0}};
-  const byDay = {};
-  const payTotals = {pos:0, upi:0, hpCard:0, credit:0, cash:0};
+async function computeReport(from, to, f){
+  const months = monthsBetween(from, to);
+  const inRange = (d)=> d>=from && d<=to;
+  const dayDocs = [];
+  for (const m of months){ (await getMonthDailyLogs(m)).forEach(doc=>{ if (doc.date && inRange(doc.date)) dayDocs.push(doc); }); }
+  const nozzleFilter = f.nozzle, productFilter = f.product;
+  const entryFiltered = !!(nozzleFilter || productFilter);
+  const r = { from, to, days:daysBetween(from,to), revenue:0, fuelRevenue:0, oilRevenue:0, liters:0,
+    byProduct:{p1:{liters:0,amount:0}, p2:{liters:0,amount:0}, p3:{liters:0,amount:0}}, byDay:{},
+    payTotals: entryFiltered ? null : {pos:0, upi:0, hpCard:0, credit:0, cash:0, expenses:0},
+    duties:[], creditSales:[], oils:[], purchases:[], expenses:[], salaryRows:[], salary:0, journal:[], receipts:[], nozzleRows:[] };
   dayDocs.forEach(doc=>{
-    revenue += doc.dayAmount||0; ltrTotal += doc.dayLiters||0;
-    byDay[doc.date] = (byDay[doc.date]||0) + (doc.dayAmount||0);
-    Object.values(doc.duties||{}).forEach(duty=>{
-      oilRevenue += duty.oilAmount||0;
-      const p = duty.pay||{};
-      payTotals.pos += p.pos||0; payTotals.upi += p.upi||0; payTotals.hpCard += p.hpCard||0; payTotals.credit += p.credit||0; payTotals.cash += p.cash||0;
-      Object.values(duty.nozzles||{}).forEach(nz=>{
-        const prod = nz.product;
-        if (prod && byProduct[prod]){ byProduct[prod].liters += nz.liters||0; byProduct[prod].amount += nz.amount||0; }
+    Object.entries(doc.duties||{}).forEach(([dutyId,x])=>{
+      if (f.staff && x.staffId!==f.staff) return;
+      const entries = Object.entries(x.nozzles||{}).filter(([nid,n])=> (!nozzleFilter || nid===nozzleFilter) && (!productFilter || n.product===productFilter));
+      if (entryFiltered && !entries.length) return;
+      let dFuel, dOil, dLtr;
+      if (entryFiltered){
+        dFuel = entries.reduce((s,[,n])=>s+num(n.amount),0); dOil = 0; dLtr = entries.reduce((s,[,n])=>s+num(n.liters),0);
+      } else {
+        dFuel = x.fuelAmount!=null ? num(x.fuelAmount) : num(x.dutyAmount) - num(x.oilAmount); dOil = num(x.oilAmount); dLtr = num(x.dutyLiters);
+      }
+      r.fuelRevenue += dFuel; r.oilRevenue += dOil; r.liters += dLtr;
+      r.byDay[doc.date] = (r.byDay[doc.date]||0) + dFuel + dOil;
+      entries.forEach(([nid,n])=>{
+        if (n.product && r.byProduct[n.product]){ r.byProduct[n.product].liters += num(n.liters); r.byProduct[n.product].amount += num(n.amount); }
+        const nz = state.nozzles.find(z=>z.id===nid);
+        r.nozzleRows.push({date:doc.date, staffName:x.staffName, nozzle: nz?nz.name:nid, product:n.product, opening:n.opening, closing:n.closing, testLiters:n.testLiters, transferLiters:n.transferLiters, liters:n.liters, rate:n.rate, amount:n.amount});
       });
+      if (r.payTotals){ const p = x.pay||{}; r.payTotals.pos += num(p.pos); r.payTotals.upi += num(p.upi); r.payTotals.hpCard += num(p.hpCard); r.payTotals.credit += num(p.credit); r.payTotals.cash += num(p.cash); r.payTotals.expenses += num(p.expenses); }
+      r.duties.push(Object.assign({date:doc.date, id:dutyId, fuelAmount:dFuel, oilAmount:dOil, liters:dLtr}, {staffName:x.staffName, startTime:x.startTime, endTime:x.endTime, nozzleCount:(x.nozzleIds||[]).length, total:dFuel+dOil, pay:x.pay||{}}));
+      if (!entryFiltered){
+        (x.creditSales||[]).forEach(c=>{ if (!f.creditor || c.creditorId===f.creditor) r.creditSales.push(Object.assign({date:doc.date, staffName:x.staffName}, c)); });
+        (x.oils||[]).forEach(o=>r.oils.push(Object.assign({date:doc.date, staffName:x.staffName}, o)));
+      }
     });
   });
-  const fuelCost = (stockData && stockData.totalAmount) || 0;
-  const fuelRevenue = revenue - oilRevenue;
-  // Oil purchase cost isn't tracked, so oil sales are treated as margin in full for now.
-  const grossMargin = revenue - fuelCost;
-  const expenses = (expData && expData.total) || 0;
-  const salary = (salData && salData.totalAccrued) || 0;
-  const jnl = journalPL(jnlData, rcpData);
-  const net = grossMargin - expenses - salary + jnl.income - jnl.expense;
-
-  body.innerHTML = `
-    <div class="row" style="justify-content:flex-end;margin-bottom:12px;">
-      <button class="btn" id="repExport" ${window.XLSX?'':'disabled title="Excel library did not load"'}>${icon('chart')} Export to Excel</button>
-    </div>
-    <div class="grid grid-kpi" style="margin-bottom:22px;">
-      <div class="card kpi"><div class="label">Fuel sales</div><div class="value">${moneyShort(fuelRevenue)}</div><div class="foot">${liters(ltrTotal)}</div></div>
-      <div class="card kpi"><div class="label">Oil sales</div><div class="value">${moneyShort(oilRevenue)}</div><div class="foot">total takings ${moneyShort(revenue)}</div></div>
-      <div class="card kpi"><div class="label">Fuel purchase cost</div><div class="value">${moneyShort(fuelCost)}</div><div class="foot">from deliveries logged</div></div>
-      <div class="card kpi"><div class="label">Gross margin</div><div class="value ${grossMargin>=0?'good':'critical'}">${moneyShort(grossMargin)}</div></div>
-      <div class="card kpi"><div class="label">Expenses</div><div class="value">${moneyShort(expenses)}</div></div>
-      <div class="card kpi"><div class="label">Salary</div><div class="value">${moneyShort(salary)}</div></div>
-      <div class="card kpi"><div class="label">Other income</div><div class="value">${moneyShort(jnl.income)}</div><div class="foot">journal + receipts</div></div>
-      <div class="card kpi"><div class="label">Other expenses</div><div class="value">${moneyShort(jnl.expense)}</div><div class="foot">journal + receipts</div></div>
-      <div class="card kpi"><div class="label">Net P&amp;L</div><div class="value ${net>=0?'good':'critical'}">${moneyShort(net)}</div></div>
-    </div>
-
-    <div class="grid grid-2">
-      <div class="card"><div class="chart-wrap"><h3 style="margin:0 0 10px;font-size:14px;">Sales by product</h3><div id="chartProduct"></div></div></div>
-      <div class="card"><div class="chart-wrap"><h3 style="margin:0 0 10px;font-size:14px;">Daily revenue trend</h3><div id="chartTrend"></div></div></div>
-    </div>
-
-    <div class="section-head"><h2>Cash &amp; bank balances</h2><span class="hint">live, as of now</span></div>
-    <div class="grid grid-kpi" style="margin-bottom:8px;">
-      ${(()=>{
-        const cash = state.ledgers.find(l=>l.cashInHand);
-        const banks = state.accounts.filter(a=>a.kind==='bank' && a.active!==false);
-        const receivables = state.accounts.filter(a=>a.kind==='receivable');
-        const bankTotal = banks.reduce((s,a)=>s+num(a.balance),0);
-        const cards = [];
-        cards.push(`<div class="card kpi"><div class="label">Cash in hand</div><div class="value ${cash&&num(cash.balance)<0?'critical':''}">${moneyShort(cash?num(cash.balance):0)}</div><div class="foot">${cash?'from journal postings':'no cash postings yet'}</div></div>`);
-        banks.forEach(a=>cards.push(`<div class="card kpi"><div class="label">${esc(a.name)}</div><div class="value ${num(a.balance)<0?'critical':''}">${moneyShort(a.balance)}</div><div class="foot">${esc(a.bankName||'bank account')}</div></div>`));
-        if (banks.length>1) cards.push(`<div class="card kpi"><div class="label">All banks</div><div class="value">${moneyShort(bankTotal)}</div><div class="foot">${banks.length} accounts</div></div>`);
-        receivables.forEach(a=>cards.push(`<div class="card kpi"><div class="label">${esc(a.name)}</div><div class="value">${moneyShort(a.balance)}</div><div class="foot">receivable</div></div>`));
-        if (!banks.length) cards.push(`<div class="card kpi"><div class="label">Bank</div><div class="value">—</div><div class="foot">add one in Setup → Accounts</div></div>`);
-        return cards.join('');
-      })()}
-    </div>
-
-    <div class="section-head"><h2>Collections by payment method</h2></div>
-    <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>Method</th><th class="num">Amount</th></tr></thead>
-      <tbody>
-        <tr><td>Cash</td><td class="num">${money(payTotals.cash)}</td></tr>
-        <tr><td>POS / Card</td><td class="num">${money(payTotals.pos)}</td></tr>
-        <tr><td>UPI</td><td class="num">${money(payTotals.upi)}</td></tr>
-        <tr><td>HP Card</td><td class="num">${money(payTotals.hpCard)}</td></tr>
-        <tr><td>Credit</td><td class="num">${money(payTotals.credit)}</td></tr>
-      </tbody>
-    </table></div></div>
-  `;
-  drawProductChart($('#chartProduct'), byProduct);
-  drawTrendChart($('#chartTrend'), byDay, monthId, dim);
-  const exportBtn = $('#repExport');
-  if (exportBtn && window.XLSX) exportBtn.onclick = ()=>exportReportExcel({
-    monthId, dayDocs, expData, salData, stockData, jnlData, rcpData, byProduct, payTotals,
-    summary: {fuelRevenue, oilRevenue, revenue, ltrTotal, fuelCost, grossMargin, expenses, salary, otherIncome:jnl.income, otherExpense:jnl.expense, net},
-  });
+  r.revenue = r.fuelRevenue + r.oilRevenue;
+  for (const m of months){
+    const st = await getMonthDoc('stockReceiptsMonthly', m);
+    ((st&&st.items)||[]).forEach(it=>{ if (inRange(it.date) && (!productFilter || it.product===productFilter)) r.purchases.push(it); });
+    const ex = await getMonthDoc('expensesMonthly', m);
+    ((ex&&ex.items)||[]).forEach(it=>{ if (inRange(it.date)) r.expenses.push(it); });
+    const jn = await getMonthDoc('journalMonthly', m);
+    ((jn&&jn.items)||[]).forEach(it=>{ if (inRange(it.date)) r.journal.push(it); });
+    const rc = await getMonthDoc('receiptsMonthly', m);
+    ((rc&&rc.items)||[]).forEach(it=>{ if (inRange(it.date) && (!f.creditor || it.creditorId===f.creditor)) r.receipts.push(it); });
+    // Salary is a monthly sheet — a month counts when any part of it falls in the range.
+    const sal = await getMonthDoc('salaryMonthly', m);
+    if (sal && sal.staff){ Object.entries(sal.staff).forEach(([sid,s])=>{ if (!f.staff || sid===f.staff){ r.salaryRows.push(Object.assign({month:m}, s)); r.salary += num(s.netPaid); } }); }
+  }
+  r.fuelCost = r.purchases.reduce((s,i)=>s+num(i.amount),0);
+  r.expenseTotal = r.expenses.reduce((s,i)=>s+num(i.amount),0);
+  const pl = journalPL({items:r.journal}, {items:r.receipts});
+  r.otherIncome = pl.income; r.otherExpense = pl.expense;
+  r.grossMargin = r.revenue - r.fuelCost;
+  r.net = r.grossMargin - r.expenseTotal - r.salary + r.otherIncome - r.otherExpense;
+  return r;
 }
 
-// Builds a multi-sheet .xlsx for the month entirely in the browser (SheetJS) and triggers the
-// download. Numbers are written as numbers (not formatted strings) so Excel can total them.
-function exportReportExcel({monthId, dayDocs, expData, salData, stockData, jnlData, rcpData, byProduct, payTotals, summary}){
+function deltaPill(cur, prev, opts){
+  opts = opts||{};
+  const d = num(cur) - num(prev);
+  if (!d && !num(prev)) return '';
+  const pct = num(prev) ? Math.round((d/Math.abs(num(prev)))*100) : null;
+  const good = opts.lowerIsBetter ? d<0 : d>0;
+  const cls = Math.abs(d)<0.5 ? 'neutral' : (good ? 'good' : 'critical');
+  return `<span class="pill ${cls}" style="margin-left:6px;">${d>=0?'+':'−'}${moneyShort(Math.abs(d))}${pct!=null?` (${pct>=0?'+':''}${pct}%)`:''}</span>`;
+}
+function kpi(label, cur, prev, foot, opts){
+  opts = opts||{};
+  const fmt = opts.fmt || moneyShort;
+  const cls = opts.signColor ? (num(cur)>=0?'good':'critical') : '';
+  return `<div class="card kpi"><div class="label">${esc(label)}</div><div class="value ${cls}">${fmt(cur)}</div><div class="foot">${prev!==undefined && prev!==null ? `prev ${fmt(prev)} ${deltaPill(cur, prev, opts)}` : (foot||'')}</div></div>`;
+}
+
+async function renderReports(mount){
+  const cfg = loadReportCfg();
+  const sel = (id, opts, cur, allLabel)=>`<select id="${id}"><option value="">${esc(allLabel)}</option>${opts.map(o=>`<option value="${esc(o.value)}" ${o.value===cur?'selected':''}>${esc(o.label)}</option>`).join('')}</select>`;
+  mount.innerHTML = `
+    <h1 class="page-title">Reports</h1>
+    <p class="page-sub">Build the report you need — pick a period, compare it, filter it, and choose what to include. The Excel export follows the same settings.</p>
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <div class="form-grid">
+        <div class="field"><label>Period</label><select id="rpPreset">
+          ${[['thisMonth','This month'],['lastMonth','Last month'],['last3','Last 3 months'],['thisQuarter','This quarter (FY)'],['fy','This financial year'],['lastFy','Last financial year'],['custom','Custom dates']].map(([v,l])=>`<option value="${v}" ${cfg.preset===v?'selected':''}>${l}</option>`).join('')}
+        </select></div>
+        <div class="field"><label>From</label><input type="date" id="rpFrom" value="${cfg.from||''}" max="${todayStr()}"></div>
+        <div class="field"><label>To</label><input type="date" id="rpTo" value="${cfg.to||''}" max="${todayStr()}"></div>
+        <div class="field"><label>Compare with</label><select id="rpCompare">
+          ${[['none','No comparison'],['previous','Previous period'],['lastYear','Same period last year']].map(([v,l])=>`<option value="${v}" ${cfg.compare===v?'selected':''}>${l}</option>`).join('')}
+        </select></div>
+      </div>
+      <div class="form-grid" style="margin-top:4px;">
+        <div class="field"><label>Staff</label>${sel('rpStaff', state.staff.map(s=>({value:s.id,label:s.name})), cfg.staff, 'All staff')}</div>
+        <div class="field"><label>Product</label>${sel('rpProduct', PRODUCT_KEYS.map(k=>({value:k,label:state.config.products[k]||k})), cfg.product, 'All products')}</div>
+        <div class="field"><label>Nozzle</label>${sel('rpNozzle', state.nozzles.map(n=>({value:n.id,label:n.name})), cfg.nozzle, 'All nozzles')}</div>
+        <div class="field"><label>Creditor</label>${sel('rpCreditor', state.creditors.map(c=>({value:c.id,label:c.name})), cfg.creditor, 'All creditors')}</div>
+        <div class="field"><label>Payment method</label>${sel('rpMethod', [['cash','Cash'],['pos','POS / Card'],['upi','UPI'],['hpCard','HP Card'],['credit','Credit']].map(([v,l])=>({value:v,label:l})), cfg.method, 'All methods')}</div>
+      </div>
+      <label style="margin-top:8px;">Sections to include</label>
+      <div class="check-grid" id="rpSections">
+        ${REPORT_SECTIONS.map(s=>`<label class="check-chip ${cfg.sections.includes(s.id)?'checked':''}"><input type="checkbox" value="${s.id}" ${cfg.sections.includes(s.id)?'checked':''}><span>${esc(s.label)}</span></label>`).join('')}
+        <button class="btn ghost sm" id="rpAllSections" type="button">All</button>
+        <button class="btn ghost sm" id="rpNoSections" type="button">None</button>
+      </div>
+      <div class="row" style="margin-top:14px;">
+        <button class="btn primary" id="rpRun">${icon('chart')} Run report</button>
+        <button class="btn" id="rpExport" ${window.XLSX?'':'disabled title="Excel library did not load"'}>Export to Excel</button>
+        <button class="btn ghost" id="rpReset">Reset</button>
+        <span class="hint" id="rpNote" style="color:var(--text-faint);font-size:12px;"></span>
+      </div>
+    </div>
+    <div id="repBody"><div class="card empty">Crunching the numbers…</div></div>
+  `;
+  const syncPreset = ()=>{
+    const p = $('#rpPreset').value; cfg.preset = p;
+    const rng = presetRange(p);
+    if (rng){ cfg.from = rng.from; cfg.to = rng.to; $('#rpFrom').value = rng.from; $('#rpTo').value = rng.to; }
+    $('#rpFrom').disabled = $('#rpTo').disabled = p!=='custom';
+  };
+  $('#rpPreset').onchange = ()=>{ syncPreset(); };
+  if (cfg.preset!=='custom' || !cfg.from || !cfg.to) syncPreset(); else { $('#rpFrom').disabled = $('#rpTo').disabled = false; }
+  $('#rpFrom').onchange = (e)=>{ cfg.from = e.target.value; };
+  $('#rpTo').onchange = (e)=>{ cfg.to = e.target.value; };
+  $('#rpCompare').onchange = (e)=>{ cfg.compare = e.target.value; };
+  [['rpStaff','staff'],['rpProduct','product'],['rpNozzle','nozzle'],['rpCreditor','creditor'],['rpMethod','method']].forEach(([id,key])=>{ $('#'+id).onchange = (e)=>{ cfg[key] = e.target.value; }; });
+  const readSections = ()=>{ cfg.sections = $$('#rpSections input:checked').map(i=>i.value); $$('#rpSections .check-chip').forEach(l=>l.classList.toggle('checked', l.querySelector('input').checked)); };
+  $$('#rpSections input').forEach(i=>i.addEventListener('change', readSections));
+  $('#rpAllSections').onclick = ()=>{ $$('#rpSections input').forEach(i=>i.checked=true); readSections(); };
+  $('#rpNoSections').onclick = ()=>{ $$('#rpSections input').forEach(i=>i.checked=false); readSections(); };
+  $('#rpReset').onclick = ()=>{ repCfg = defaultReportCfg(); saveReportCfg(); renderReports(mount); };
+  $('#rpRun').onclick = ()=>runReport();
+  $('#rpExport').onclick = ()=>runReport(true);
+  await runReport();
+}
+
+let lastReport = null;
+async function runReport(exportAfter){
+  const cfg = loadReportCfg();
+  const body = $('#repBody'); if (!body) return;
+  if (!cfg.from || !cfg.to || cfg.from>cfg.to){ body.innerHTML = `<div class="card empty">Pick a valid From / To range.</div>`; return; }
+  saveReportCfg();
+  body.innerHTML = `<div class="card empty">Crunching the numbers…</div>`;
+  const filters = {staff:cfg.staff, product:cfg.product, nozzle:cfg.nozzle, creditor:cfg.creditor, method:cfg.method};
+  const main = await computeReport(cfg.from, cfg.to, filters);
+  const cmpRange = comparisonRange(cfg.from, cfg.to, cfg.compare);
+  const cmp = cmpRange ? await computeReport(cmpRange.from, cmpRange.to, filters) : null;
+  lastReport = {cfg:Object.assign({}, cfg), main, cmp};
+  renderReportBody(body, cfg, main, cmp);
+  const notes = [];
+  if (cfg.product || cfg.nozzle) notes.push('Product / nozzle filters apply to fuel figures only — oils, collections and credit sales are hidden.');
+  if (cfg.creditor) notes.push('Creditor filter applies to credit sales and receipts.');
+  if (cfg.staff) notes.push('Staff filter applies to duties and salary.');
+  $('#rpNote') && ($('#rpNote').textContent = notes.join(' '));
+  if (exportAfter) exportReportExcel(lastReport);
+}
+
+function renderReportBody(body, cfg, r, c){
+  const has = (id)=>cfg.sections.includes(id);
+  const title = rangeLabel(r.from, r.to) + (c ? ` <span class="hint" style="font-size:13px;color:var(--text-muted);">vs ${rangeLabel(c.from, c.to)}</span>` : '');
+  const filt = [cfg.staff && 'Staff: '+((state.staff.find(s=>s.id===cfg.staff)||{}).name||''), cfg.product && 'Product: '+(state.config.products[cfg.product]||''), cfg.nozzle && 'Nozzle: '+((state.nozzles.find(n=>n.id===cfg.nozzle)||{}).name||''), cfg.creditor && 'Creditor: '+((state.creditors.find(x=>x.id===cfg.creditor)||{}).name||''), cfg.method && 'Method: '+cfg.method].filter(Boolean);
+  const P = (k)=> c ? c[k] : null;
+  const parts = [];
+  parts.push(`<div class="section-head"><h2>${title}</h2><span class="hint">${r.days} day${r.days===1?'':'s'}${filt.length?' · '+esc(filt.join(' · ')):''}</span></div>`);
+  if (!cfg.sections.length){ body.innerHTML = parts.join('') + `<div class="card empty">No sections selected — tick at least one above.</div>`; return; }
+
+  if (has('summary')) parts.push(`<div class="grid grid-kpi" style="margin-bottom:22px;">
+    ${kpi('Fuel sales', r.fuelRevenue, P('fuelRevenue'), liters(r.liters))}
+    ${kpi('Oil sales', r.oilRevenue, P('oilRevenue'), 'total takings '+moneyShort(r.revenue))}
+    ${kpi('Fuel purchase cost', r.fuelCost, P('fuelCost'), 'from deliveries logged', {lowerIsBetter:true})}
+    ${kpi('Gross margin', r.grossMargin, P('grossMargin'), '', {signColor:true})}
+    ${kpi('Expenses', r.expenseTotal, P('expenseTotal'), '', {lowerIsBetter:true})}
+    ${kpi('Salary', r.salary, P('salary'), '', {lowerIsBetter:true})}
+    ${kpi('Other income', r.otherIncome, P('otherIncome'), 'journal + receipts')}
+    ${kpi('Other expenses', r.otherExpense, P('otherExpense'), 'journal', {lowerIsBetter:true})}
+    ${kpi('Net P&L', r.net, P('net'), '', {signColor:true})}
+    ${kpi('Fuel liters', r.liters, P('liters'), '', {fmt:liters})}
+  </div>`);
+
+  if (has('balances')){
+    const cash = state.ledgers.find(l=>l.cashInHand);
+    const banks = state.accounts.filter(a=>a.kind==='bank' && a.active!==false);
+    const receivables = state.accounts.filter(a=>a.kind==='receivable');
+    const cards = [`<div class="card kpi"><div class="label">Cash in hand</div><div class="value ${cash&&num(cash.balance)<0?'critical':''}">${moneyShort(cash?num(cash.balance):0)}</div><div class="foot">${cash?'duty cash + receipts + journal':'no cash postings yet'}</div></div>`];
+    banks.forEach(a=>cards.push(`<div class="card kpi"><div class="label">${esc(a.name)}</div><div class="value ${num(a.balance)<0?'critical':''}">${moneyShort(a.balance)}</div><div class="foot">${esc(a.bankName||'bank account')}</div></div>`));
+    if (banks.length>1) cards.push(`<div class="card kpi"><div class="label">All banks</div><div class="value">${moneyShort(banks.reduce((s,a)=>s+num(a.balance),0))}</div><div class="foot">${banks.length} accounts</div></div>`);
+    receivables.forEach(a=>cards.push(`<div class="card kpi"><div class="label">${esc(a.name)}</div><div class="value">${moneyShort(a.balance)}</div><div class="foot">receivable</div></div>`));
+    if (!banks.length) cards.push(`<div class="card kpi"><div class="label">Bank</div><div class="value">—</div><div class="foot">add one in Setup → Accounts</div></div>`);
+    parts.push(`<div class="section-head"><h2>Cash &amp; bank balances</h2><span class="hint">live, as of now</span></div><div class="grid grid-kpi" style="margin-bottom:8px;">${cards.join('')}</div>`);
+  }
+
+  if (has('products') || has('trend')) parts.push(`<div class="grid grid-2" style="margin-top:14px;">
+    ${has('products')?`<div class="card"><div class="chart-wrap"><h3 style="margin:0 0 10px;font-size:14px;">Sales by product</h3><div id="chartProduct"></div>${c?`<div class="legend"><span class="item">prev: ${PRODUCT_KEYS.map(k=>esc((state.config.products[k]||k)+' '+moneyShort(c.byProduct[k].amount))).join(' · ')}</span></div>`:''}</div></div>`:''}
+    ${has('trend')?`<div class="card"><div class="chart-wrap"><h3 style="margin:0 0 10px;font-size:14px;">Daily revenue trend</h3><div id="chartTrend"></div></div></div>`:''}
+  </div>`);
+
+  if (has('collections')){
+    const methods = [['cash','Cash'],['pos','POS / Card'],['upi','UPI'],['hpCard','HP Card'],['credit','Credit'],['expenses','Till expenses']].filter(([k])=>!cfg.method || k===cfg.method || k==='expenses' && !cfg.method);
+    parts.push(`<div class="section-head"><h2>Collections by payment method</h2></div>
+      <div class="card"><div class="table-wrap"><table><thead><tr><th>Method</th><th class="num">Amount</th>${c?'<th class="num">Previous</th><th>Change</th>':''}</tr></thead><tbody>
+      ${r.payTotals ? methods.map(([k,l])=>`<tr><td>${l}</td><td class="num">${money(r.payTotals[k])}</td>${c?`<td class="num">${money(c.payTotals?c.payTotals[k]:0)}</td><td>${deltaPill(r.payTotals[k], c.payTotals?c.payTotals[k]:0)}</td>`:''}</tr>`).join('') : `<tr><td colspan="${c?4:2}" class="empty">Not available with a product or nozzle filter.</td></tr>`}
+      </tbody></table></div></div>`);
+  }
+
+  const table = (title, head, rows, foot)=> `<div class="section-head"><h2>${title}</h2><span class="hint">${rows.length} row${rows.length===1?'':'s'}</span></div>
+    <div class="card"><div class="table-wrap"><table><thead><tr>${head.map(h=>`<th class="${h.num?'num':''}">${esc(h.label)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.length? rows.map(row=>`<tr>${row.map((v,i)=>`<td class="${head[i].num?'num':''}">${v}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${head.length}" class="empty">Nothing in this period.</td></tr>`}</tbody>
+    ${foot?`<tfoot><tr>${foot.map((v,i)=>`<td class="${head[i].num?'num':''}" style="font-weight:700;">${v}</td>`).join('')}</tr></tfoot>`:''}</table></div></div>`;
+  const sortD = (a,b)=>b.date.localeCompare(a.date);
+
+  if (has('duties')){
+    const rows = r.duties.slice().sort(sortD);
+    const mcol = cfg.method ? [{label:{cash:'Cash',pos:'POS',upi:'UPI',hpCard:'HP Card',credit:'Credit'}[cfg.method], num:true}] : [];
+    parts.push(table('Duties', [{label:'Date'},{label:'Staff'},{label:'Time'},{label:'Nozzles',num:true},{label:'Liters',num:true},{label:'Fuel',num:true},{label:'Oils',num:true},{label:'Total',num:true},...mcol],
+      rows.map(d=>[fmtDateLabel(d.date), esc(d.staffName), esc((d.startTime||'—')+'–'+(d.endTime||'—')), d.nozzleCount, liters(d.liters), money(d.fuelAmount), money(d.oilAmount), money(d.total), ...(cfg.method?[money(d.pay[cfg.method])]:[])]),
+      ['Total','','','', liters(r.liters), money(r.fuelRevenue), money(r.oilRevenue), money(r.revenue), ...(cfg.method?[money(rows.reduce((s,d)=>s+num(d.pay[cfg.method]),0))]:[])]));
+  }
+  if (has('credit')){
+    const rows = r.creditSales.slice().sort(sortD);
+    parts.push(table('Credit sales', [{label:'Date'},{label:'Creditor'},{label:'Staff'},{label:'Indent'},{label:'Vehicle'},{label:'Liters',num:true},{label:'Amount',num:true}],
+      rows.map(x=>[fmtDateLabel(x.date), esc(x.creditorName), esc(x.staffName), esc(x.indentNo||'—'), esc(x.vehicleNo||'—'), liters(x.liters), money(x.amount)]),
+      ['Total','','','','', liters(rows.reduce((s,x)=>s+num(x.liters),0)), money(rows.reduce((s,x)=>s+num(x.amount),0))]));
+  }
+  if (has('oils')){
+    const rows = r.oils.slice().sort(sortD);
+    parts.push(table('Oil sales', [{label:'Date'},{label:'Staff'},{label:'Oil / product'},{label:'Amount',num:true}],
+      rows.map(o=>[fmtDateLabel(o.date), esc(o.staffName), esc(o.name||'—'), money(o.amount)]), ['Total','','', money(r.oilRevenue)]));
+  }
+  if (has('purchases')){
+    const rows = r.purchases.slice().sort(sortD);
+    parts.push(table('Fuel purchases', [{label:'Date'},{label:'Product'},{label:'Tank'},{label:'Supplier'},{label:'Ref'},{label:'Liters',num:true},{label:'Rate',num:true},{label:'Amount',num:true}],
+      rows.map(it=>[fmtDateLabel(it.date), esc(state.config.products[it.product]||it.product||'—'), esc(it.tankName||'—'), esc(it.supplier||'—'), esc(it.ref||'—'), liters(it.liters), money(it.rate), money(it.amount)]),
+      ['Total','','','','', liters(rows.reduce((s,i)=>s+num(i.liters),0)), '', money(r.fuelCost)]));
+  }
+  if (has('expenses')){
+    const rows = r.expenses.slice().sort(sortD);
+    parts.push(table('Expenses', [{label:'Date'},{label:'Category'},{label:'Description'},{label:'Source'},{label:'Amount',num:true}],
+      rows.map(it=>[fmtDateLabel(it.date), esc(it.category||''), esc(it.description||'—'), it.source==='duty'?'Duty till':'Manual', money(it.amount)]), ['Total','','','', money(r.expenseTotal)]));
+  }
+  if (has('salary')){
+    const rows = r.salaryRows.slice().sort((a,b)=>b.month.localeCompare(a.month) || (a.name||'').localeCompare(b.name||''));
+    parts.push(table('Salary', [{label:'Month'},{label:'Staff'},{label:'Base',num:true},{label:'Advance',num:true},{label:'Deduction',num:true},{label:'Net',num:true},{label:'Status'}],
+      rows.map(s=>[monthLabel(s.month), esc(s.name), money(s.baseSalary), money(s.advance), money(s.deduction), money(s.netPaid), `<span class="pill ${s.status==='paid'?'good':'neutral'}">${s.status==='paid'?'Paid':'Pending'}</span>`]),
+      ['Total','','','','', money(r.salary), '']));
+  }
+  if (has('journal')){
+    const rows = r.journal.slice().sort(sortD);
+    parts.push(table('Journal entries', [{label:'Date'},{label:'Debit'},{label:'Credit'},{label:'Amount',num:true},{label:'Narration'},{label:'By'}],
+      rows.map(it=>[fmtDateLabel(it.date), esc(targetLabel(it.debit)||it.debitLabel||''), esc(targetLabel(it.credit)||it.creditLabel||''), money(it.amount), esc(it.narration||'—'), esc(it.by||'—')])));
+  }
+  if (has('receipts')){
+    const rows = r.receipts.slice().sort(sortD);
+    parts.push(table('Receipts', [{label:'Date'},{label:'From'},{label:'Type'},{label:'Amount',num:true},{label:'Into'},{label:'Mode'},{label:'Reference / narration'}],
+      rows.map(it=>[fmtDateLabel(it.date), esc(receiptFromLabel(it)), it.type==='creditor'?'Creditor':'Other', money(it.amount), esc(it.into==='cash'?'Cash in hand':((state.accounts.find(a=>'acct:'+a.id===it.into)||{}).name||'')), esc(it.mode||''), esc([it.reference,it.narration].filter(Boolean).join(' · ')||'—')]),
+      ['Total','','', money(rows.reduce((s,i)=>s+num(i.amount),0)), '','','']));
+  }
+  body.innerHTML = parts.join('');
+  if (has('products')) drawProductChart($('#chartProduct'), r.byProduct);
+  if (has('trend')) drawTrendChart($('#chartTrend'), r.byDay, r.from, r.to, c ? {byDay:c.byDay, from:c.from, to:c.to} : null);
+}
+
+// Builds a multi-sheet .xlsx for the current report entirely in the browser (SheetJS) and
+// triggers the download. Numbers are written as numbers so Excel can total them.
+function exportReportExcel(rep){
+  if (!rep || !window.XLSX) return;
+  const {cfg, main:r, cmp:c} = rep;
+  const has = (id)=>cfg.sections.includes(id);
   const r2 = (n)=> Math.round(num(n)*100)/100;
   const wb = XLSX.utils.book_new();
   const addSheet = (name, rows, widths)=>{
@@ -2082,126 +2322,74 @@ function exportReportExcel({monthId, dayDocs, expData, salData, stockData, jnlDa
     XLSX.utils.book_append_sheet(wb, ws, name);
   };
   const station = state.config.stationName || 'Fuel Ledger';
-  const label = monthLabel(monthId);
+  const label = rangeLabel(r.from, r.to);
+  const filt = [cfg.staff && 'Staff: '+((state.staff.find(s=>s.id===cfg.staff)||{}).name||''), cfg.product && 'Product: '+(state.config.products[cfg.product]||''), cfg.nozzle && 'Nozzle: '+((state.nozzles.find(n=>n.id===cfg.nozzle)||{}).name||''), cfg.creditor && 'Creditor: '+((state.creditors.find(x=>x.id===cfg.creditor)||{}).name||''), cfg.method && 'Method: '+cfg.method].filter(Boolean);
 
-  // 1. Summary / P&L
-  addSheet('Summary', [
-    [station], [`Monthly P&L — ${label}`], [],
-    ['Item', 'Amount (₹)'],
-    ['Fuel sales', r2(summary.fuelRevenue)],
-    ['Oil sales', r2(summary.oilRevenue)],
-    ['Total takings', r2(summary.revenue)],
-    ['Fuel liters sold', r2(summary.ltrTotal)],
-    ['Fuel purchase cost', r2(summary.fuelCost)],
-    ['Gross margin', r2(summary.grossMargin)],
-    ['Expenses', r2(summary.expenses)],
-    ['Salary', r2(summary.salary)],
-    ['Other income (journal)', r2(summary.otherIncome)],
-    ['Other expenses (journal)', r2(summary.otherExpense)],
-    ['Net P&L', r2(summary.net)],
-    [],
-    ['Collections by method', 'Amount (₹)'],
-    ['Cash', r2(payTotals.cash)], ['POS / Card', r2(payTotals.pos)], ['UPI', r2(payTotals.upi)], ['HP Card', r2(payTotals.hpCard)], ['Credit', r2(payTotals.credit)],
-    [],
-    ['Sales by product', 'Liters', 'Amount (₹)'],
-    ...PRODUCT_KEYS.map(k=>[state.config.products[k]||k, r2(byProduct[k].liters), r2(byProduct[k].amount)]),
-  ], [26, 16, 16]);
-
-  // 2. Daily sales
-  const days = dayDocs.slice().sort((a,b)=>(a.date||'').localeCompare(b.date||''));
-  addSheet('Daily sales', [
-    ['Date', 'Duties', 'Fuel liters', 'Fuel sales (₹)', 'Oil sales (₹)', 'Total (₹)'],
-    ...days.map(d=>{
-      const duties = Object.values(d.duties||{});
-      const oil = duties.reduce((s,x)=>s+num(x.oilAmount),0);
-      return [d.date, duties.length, r2(d.dayLiters), r2(num(d.dayAmount)-oil), r2(oil), r2(d.dayAmount)];
-    }),
-  ], [12, 8, 12, 14, 14, 14]);
-
-  // 3. Duties (one row per duty)
-  const dutyRows = [];
-  days.forEach(d=>Object.values(d.duties||{}).forEach(x=>{
-    const p = x.pay||{};
-    dutyRows.push([d.date, x.staffName, x.startTime||'', x.endTime||'', (x.nozzleIds||[]).length, r2(x.dutyLiters),
-      r2(x.fuelAmount!=null?x.fuelAmount:x.dutyAmount), r2(x.oilAmount), r2(x.dutyAmount),
-      r2(p.cash), r2(p.pos), r2(p.upi), r2(p.hpCard), r2(p.credit), r2(p.expenses)]);
-  }));
-  addSheet('Duties', [
-    ['Date', 'Staff', 'Start', 'End', 'Nozzles', 'Liters', 'Fuel (₹)', 'Oils (₹)', 'Total (₹)', 'Cash', 'POS', 'UPI', 'HP Card', 'Credit', 'Expenses'],
-    ...dutyRows,
-  ], [12, 18, 7, 7, 8, 10, 12, 10, 12, 12, 10, 10, 10, 10, 10]);
-
-  // 4. Nozzle readings
-  const nzRows = [];
-  days.forEach(d=>Object.values(d.duties||{}).forEach(x=>Object.entries(x.nozzles||{}).forEach(([nid,n])=>{
-    const nz = state.nozzles.find(z=>z.id===nid);
-    nzRows.push([d.date, x.staffName, nz?nz.name:nid, state.config.products[n.product]||n.product||'', r2(n.opening), r2(n.closing), r2(n.testLiters), r2(n.transferLiters), r2(n.liters), r2(n.rate), r2(n.amount)]);
-  })));
-  addSheet('Nozzle readings', [
+  if (has('summary') || has('collections') || has('products') || has('balances')){
+    const line = (name, k, opts)=> c ? [name, r2(r[k]), r2(c[k]), r2(r[k]-c[k])] : [name, r2(r[k])];
+    const rows = [[station], [`Report — ${label}`], filt.length?['Filters', filt.join(' · ')]:[], []];
+    if (has('summary')){
+      rows.push(c ? ['Item', 'This period (₹)', `Previous (${rangeLabel(c.from,c.to)})`, 'Change'] : ['Item', 'Amount (₹)']);
+      rows.push(line('Fuel sales','fuelRevenue'), line('Oil sales','oilRevenue'), line('Total takings','revenue'), line('Fuel liters sold','liters'),
+        line('Fuel purchase cost','fuelCost'), line('Gross margin','grossMargin'), line('Expenses','expenseTotal'), line('Salary','salary'),
+        line('Other income (journal + receipts)','otherIncome'), line('Other expenses (journal)','otherExpense'), line('Net P&L','net'), []);
+    }
+    if (has('collections') && r.payTotals){
+      rows.push(c?['Collections by method','This period','Previous','Change']:['Collections by method', 'Amount (₹)']);
+      [['cash','Cash'],['pos','POS / Card'],['upi','UPI'],['hpCard','HP Card'],['credit','Credit'],['expenses','Till expenses']].forEach(([k,l])=>{ if (!cfg.method || k===cfg.method) rows.push(c?[l, r2(r.payTotals[k]), r2(c.payTotals?c.payTotals[k]:0), r2(r.payTotals[k]-(c.payTotals?c.payTotals[k]:0))]:[l, r2(r.payTotals[k])]); });
+      rows.push([]);
+    }
+    if (has('products')){
+      rows.push(c?['Sales by product','Liters','Amount (₹)','Prev liters','Prev amount']:['Sales by product', 'Liters', 'Amount (₹)']);
+      PRODUCT_KEYS.forEach(k=>rows.push(c?[state.config.products[k]||k, r2(r.byProduct[k].liters), r2(r.byProduct[k].amount), r2(c.byProduct[k].liters), r2(c.byProduct[k].amount)]:[state.config.products[k]||k, r2(r.byProduct[k].liters), r2(r.byProduct[k].amount)]));
+      rows.push([]);
+    }
+    if (has('balances')){
+      const cash = state.ledgers.find(l=>l.cashInHand);
+      rows.push(['Balances (as of export)', 'Amount (₹)'], ['Cash in hand', r2(cash?cash.balance:0)]);
+      state.accounts.filter(a=>a.kind==='bank').forEach(a=>rows.push([a.name+' (bank)', r2(a.balance)]));
+      state.accounts.filter(a=>a.kind==='receivable').forEach(a=>rows.push([a.name+' (receivable)', r2(a.balance)]));
+    }
+    addSheet('Summary', rows, [34, 18, 22, 14, 14]);
+  }
+  if (has('trend')){
+    const days = []; for (let d=r.from; d<=r.to; d=addDays(d,1)) days.push(d);
+    addSheet('Daily sales', [c?['Date','Sales (₹)','Prev date','Prev sales (₹)']:['Date', 'Sales (₹)'], ...days.map((d,i)=>{ const row=[d, r2(r.byDay[d]||0)]; if (c){ const pd = addDays(c.from,i); row.push(pd<=c.to?pd:'', pd<=c.to?r2(c.byDay[pd]||0):''); } return row; })], [12, 14, 12, 14]);
+  }
+  if (has('duties')) addSheet('Duties', [
+    ['Date', 'Staff', 'Start', 'End', 'Nozzles', 'Liters', 'Fuel (₹)', 'Oils (₹)', 'Total (₹)', 'Cash', 'POS', 'UPI', 'HP Card', 'Credit', 'Till expenses'],
+    ...r.duties.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(d=>[d.date, d.staffName, d.startTime||'', d.endTime||'', d.nozzleCount, r2(d.liters), r2(d.fuelAmount), r2(d.oilAmount), r2(d.total), r2(d.pay.cash), r2(d.pay.pos), r2(d.pay.upi), r2(d.pay.hpCard), r2(d.pay.credit), r2(d.pay.expenses)]),
+  ], [12, 18, 7, 7, 8, 10, 12, 10, 12, 12, 10, 10, 10, 10, 12]);
+  if (has('duties') || has('products')) addSheet('Nozzle readings', [
     ['Date', 'Staff', 'Nozzle', 'Product', 'Opening', 'Closing', 'Test (L)', 'Transfer (L)', 'Sale (L)', 'Rate', 'Amount (₹)'],
-    ...nzRows,
+    ...r.nozzleRows.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(n=>[n.date, n.staffName, n.nozzle, state.config.products[n.product]||n.product||'', r2(n.opening), r2(n.closing), r2(n.testLiters), r2(n.transferLiters), r2(n.liters), r2(n.rate), r2(n.amount)]),
   ], [12, 18, 12, 14, 12, 12, 9, 11, 10, 9, 12]);
-
-  // 5. Credit sales & oil sales
-  const crRows = [], oilRows = [];
-  days.forEach(d=>Object.values(d.duties||{}).forEach(x=>{
-    (x.creditSales||[]).forEach(c=>crRows.push([d.date, x.staffName, c.creditorName, c.indentNo||'', c.vehicleNo||'', r2(c.liters), r2(c.amount)]));
-    (x.oils||[]).forEach(o=>oilRows.push([d.date, x.staffName, o.name||'', r2(o.amount)]));
-  }));
-  addSheet('Credit sales', [['Date', 'Staff', 'Creditor', 'Indent No.', 'Vehicle No.', 'Liters', 'Amount (₹)'], ...crRows], [12, 18, 22, 12, 14, 10, 12]);
-  addSheet('Oil sales', [['Date', 'Staff', 'Oil / product', 'Amount (₹)'], ...oilRows], [12, 18, 26, 12]);
-
-  // 6. Purchases, expenses, salary
-  const purchases = ((stockData&&stockData.items)||[]).slice().sort((a,b)=>a.date.localeCompare(b.date));
-  addSheet('Purchases', [
-    ['Date', 'Product', 'Tank', 'Supplier', 'Invoice / DO', 'Liters', 'Rate', 'Amount (₹)'],
-    ...purchases.map(it=>[it.date, state.config.products[it.product]||it.product||'', it.tankName||'', it.supplier||'', it.ref||'', r2(it.liters), r2(it.rate), r2(it.amount)]),
-  ], [12, 14, 12, 16, 14, 10, 9, 12]);
-  const exps = ((expData&&expData.items)||[]).slice().sort((a,b)=>a.date.localeCompare(b.date));
-  addSheet('Expenses', [
-    ['Date', 'Category', 'Description', 'Source', 'Amount (₹)'],
-    ...exps.map(it=>[it.date, it.category||'', it.description||'', it.source==='duty'?'Duty till':'Manual', r2(it.amount)]),
-  ], [12, 22, 30, 10, 12]);
-  const sal = Object.values((salData&&salData.staff)||{});
-  addSheet('Salary', [
-    ['Staff', 'Wage type', 'Hours', 'Base (₹)', 'Advance (₹)', 'Deduction (₹)', 'Net (₹)', 'Status', 'Paid date'],
-    ...sal.map(s=>[s.name, s.wageType||'monthly', s.hoursWorked!=null?r2(s.hoursWorked):'', r2(s.baseSalary), r2(s.advance), r2(s.deduction), r2(s.netPaid), s.status||'', s.paidDate||'']),
-  ], [18, 10, 8, 12, 12, 13, 12, 9, 12]);
-
-  // 7. Journal
-  const jnl = ((jnlData&&jnlData.items)||[]).slice().sort((a,b)=>a.date.localeCompare(b.date));
-  addSheet('Journal', [
-    ['Date', 'Debit (Dr)', 'Credit (Cr)', 'Amount (₹)', 'Narration', 'By'],
-    ...jnl.map(it=>[it.date, targetLabel(it.debit)||it.debitLabel||'', targetLabel(it.credit)||it.creditLabel||'', r2(it.amount), it.narration||'', it.by||'']),
-  ], [12, 28, 28, 12, 36, 14]);
-
-  const rcp = ((rcpData&&rcpData.items)||[]).slice().sort((a,b)=>a.date.localeCompare(b.date));
-  addSheet('Receipts', [
-    ['Date', 'From', 'Type', 'Amount (₹)', 'Into', 'Mode', 'Reference', 'Narration', 'Ledger', 'By'],
-    ...rcp.map(it=>[it.date, receiptFromLabel(it), it.type==='creditor'?'Creditor':'Other', r2(it.amount), it.into==='cash'?'Cash in hand':((state.accounts.find(a=>'acct:'+a.id===it.into)||{}).name||''), it.mode||'', it.reference||'', it.narration||'', targetLabel(it.ledger)||'', it.by||'']),
-  ], [12, 24, 10, 12, 18, 12, 14, 30, 22, 14]);
-
-  // 8. Current balances (as of export time)
-  addSheet('Balances', [
+  if (has('credit')) addSheet('Credit sales', [['Date', 'Creditor', 'Staff', 'Indent No.', 'Vehicle No.', 'Liters', 'Amount (₹)'], ...r.creditSales.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(x=>[x.date, x.creditorName, x.staffName, x.indentNo||'', x.vehicleNo||'', r2(x.liters), r2(x.amount)])], [12, 22, 18, 12, 14, 10, 12]);
+  if (has('oils')) addSheet('Oil sales', [['Date', 'Staff', 'Oil / product', 'Amount (₹)'], ...r.oils.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(o=>[o.date, o.staffName, o.name||'', r2(o.amount)])], [12, 18, 26, 12]);
+  if (has('purchases')) addSheet('Purchases', [['Date', 'Product', 'Tank', 'Supplier', 'Invoice / DO', 'Liters', 'Rate', 'Amount (₹)'], ...r.purchases.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, state.config.products[it.product]||it.product||'', it.tankName||'', it.supplier||'', it.ref||'', r2(it.liters), r2(it.rate), r2(it.amount)])], [12, 14, 12, 16, 14, 10, 9, 12]);
+  if (has('expenses')) addSheet('Expenses', [['Date', 'Category', 'Description', 'Source', 'Amount (₹)'], ...r.expenses.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, it.category||'', it.description||'', it.source==='duty'?'Duty till':'Manual', r2(it.amount)])], [12, 22, 30, 10, 12]);
+  if (has('salary')) addSheet('Salary', [['Month', 'Staff', 'Wage type', 'Hours', 'Base (₹)', 'Advance (₹)', 'Deduction (₹)', 'Net (₹)', 'Status', 'Paid date'], ...r.salaryRows.map(s=>[s.month, s.name, s.wageType||'monthly', s.hoursWorked!=null?r2(s.hoursWorked):'', r2(s.baseSalary), r2(s.advance), r2(s.deduction), r2(s.netPaid), s.status||'', s.paidDate||''])], [10, 18, 10, 8, 12, 12, 13, 12, 9, 12]);
+  if (has('journal')) addSheet('Journal', [['Date', 'Debit (Dr)', 'Credit (Cr)', 'Amount (₹)', 'Narration', 'By'], ...r.journal.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, targetLabel(it.debit)||it.debitLabel||'', targetLabel(it.credit)||it.creditLabel||'', r2(it.amount), it.narration||'', it.by||''])], [12, 28, 28, 12, 36, 14]);
+  if (has('receipts')) addSheet('Receipts', [['Date', 'From', 'Type', 'Amount (₹)', 'Into', 'Mode', 'Reference', 'Narration', 'Ledger', 'By'], ...r.receipts.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, receiptFromLabel(it), it.type==='creditor'?'Creditor':'Other', r2(it.amount), it.into==='cash'?'Cash in hand':((state.accounts.find(a=>'acct:'+a.id===it.into)||{}).name||''), it.mode||'', it.reference||'', it.narration||'', targetLabel(it.ledger)||'', it.by||''])], [12, 24, 10, 12, 18, 12, 14, 30, 22, 14]);
+  if (has('balances')) addSheet('Balances', [
     ['Ledgers', 'Group', 'Balance (₹, Dr +/Cr −)'],
     ...state.ledgers.map(l=>[l.name, (LEDGER_GROUPS[l.group]||{}).label||l.group||'', r2(l.balance)]),
-    [],
-    ['Creditors', 'Phone', 'Outstanding (₹)', 'Bowser stock (L)'],
-    ...state.creditors.map(c=>[c.name, c.phone||'', r2(c.balance), c.isBowser?r2(c.bowserStockL):'']),
-    [],
-    ['Accounts', 'Kind', 'Balance (₹)'],
+    [], ['Creditors', 'Phone', 'Outstanding (₹)', 'Bowser stock (L)'],
+    ...state.creditors.map(cr=>[cr.name, cr.phone||'', r2(cr.balance), cr.isBowser?r2(cr.bowserStockL):'']),
+    [], ['Accounts', 'Kind', 'Balance (₹)'],
     ...state.accounts.map(a=>[a.name, a.kind||'', r2(a.balance)]),
-    [],
-    ['Tanks', 'Product', 'Capacity (L)', 'Current stock (L)'],
+    [], ['Tanks', 'Product', 'Capacity (L)', 'Current stock (L)'],
     ...state.tanks.map(t=>[t.name, state.config.products[t.product]||t.product||'', r2(t.capacityL), r2(t.currentStockL)]),
   ], [24, 16, 16, 16]);
+  if (!wb.SheetNames.length) addSheet('Summary', [[station], [`Report — ${label}`], ['No sections selected.']]);
 
   const safeName = station.replace(/[^\w]+/g,'-').replace(/^-|-$/g,'');
-  XLSX.writeFile(wb, `${safeName}-${monthId}.xlsx`);
-  logActivity({entity:'Report', entityLabel:label, action:'add', summary:'Exported month to Excel'});
+  XLSX.writeFile(wb, `${safeName}-${r.from}-to-${r.to}.xlsx`);
+  logActivity({entity:'Report', entityLabel:label, action:'add', summary:'Exported report to Excel'});
 }
 
 function drawProductChart(el, byProduct){
+  if (!el) return;
   const rows = PRODUCT_KEYS.map(k=>({key:k, name:state.config.products[k]||k, amount:byProduct[k].amount, liters:byProduct[k].liters, color:PRODUCT_COLOR[k]}));
   const max = Math.max(1, ...rows.map(r=>r.amount));
   const W=440,H=rows.length*46+10;
@@ -2216,33 +2404,33 @@ function drawProductChart(el, byProduct){
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="overflow:visible">${bars}</svg>`;
 }
 
-function drawTrendChart(el, byDay, monthId, dim){
+// Line of daily revenue across the range; a comparison period is drawn as a faint dashed line
+// aligned by day number.
+function drawTrendChart(el, byDay, from, to, cmp){
+  if (!el) return;
   const W=520,H=180,padL=8,padR=8,padT=10,padB=24;
-  const vals = [];
-  for (let d=1; d<=dim; d++){
-    const key = monthId+'-'+pad2(d);
-    vals.push(byDay[key]||0);
-  }
-  const max = Math.max(1, ...vals);
+  const series = (bd, f, t)=>{ const v=[]; for (let d=f; d<=t; d=addDays(d,1)) v.push(bd[d]||0); return v; };
+  const vals = series(byDay, from, to);
+  const cvals = cmp ? series(cmp.byDay, cmp.from, cmp.to) : [];
+  const n = Math.max(vals.length, cvals.length, 2);
+  const max = Math.max(1, ...vals, ...cvals);
   const innerW = W-padL-padR, innerH = H-padT-padB;
-  const pts = vals.map((v,i)=>{
-    const x = padL + (i/(Math.max(1,vals.length-1)))*innerW;
-    const y = padT + innerH - (v/max)*innerH;
-    return [x,y];
-  });
-  const line = pts.map((p,i)=>(i===0?'M':'L')+p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ');
+  const toPts = (v)=> v.map((y,i)=>[padL + (i/(n-1))*innerW, padT + innerH - (y/max)*innerH]);
+  const path = (pts)=> pts.map((p,i)=>(i===0?'M':'L')+p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ');
+  const pts = toPts(vals);
+  const line = path(pts);
   const area = line + ` L${pts[pts.length-1][0].toFixed(1)},${padT+innerH} L${pts[0][0].toFixed(1)},${padT+innerH} Z`;
   const lastPt = pts[pts.length-1];
-  const gridY = [0,0.5,1].map(f=>padT+innerH*f);
-  const gridLines = gridY.map(y=>`<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="var(--border)" stroke-width="1"/>`).join('');
-  const labels = `<text x="${padL}" y="${H-6}" font-size="11">1</text><text x="${W-padR}" y="${H-6}" font-size="11" text-anchor="end">${dim}</text>`;
+  const gridLines = [0,0.5,1].map(f=>padT+innerH*f).map(y=>`<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="var(--border)" stroke-width="1"/>`).join('');
+  const labels = `<text x="${padL}" y="${H-6}" font-size="11">${esc(fmtDateLabel(from))}</text><text x="${W-padR}" y="${H-6}" font-size="11" text-anchor="end">${esc(fmtDateLabel(to))}</text>`;
+  const cmpPath = cvals.length ? `<path d="${path(toPts(cvals))}" fill="none" stroke="var(--text-faint)" stroke-width="1.5" stroke-dasharray="4 3"/>` : '';
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">
-    ${gridLines}
+    ${gridLines}${cmpPath}
     <path d="${area}" fill="var(--brand)" opacity="0.12" stroke="none"/>
     <path d="${line}" fill="none" stroke="var(--brand)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
     <circle cx="${lastPt[0]}" cy="${lastPt[1]}" r="3.5" fill="var(--brand)"/>
     ${labels}
-  </svg>`;
+  </svg>${cvals.length?`<div class="legend"><span class="item"><span class="dot" style="background:var(--brand)"></span>this period</span><span class="item"><span class="dot" style="background:var(--text-faint)"></span>comparison</span></div>`:''}`;
 }
 
 /* ============================== LEDGERS & JOURNAL ============================== */
