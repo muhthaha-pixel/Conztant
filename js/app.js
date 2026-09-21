@@ -1990,6 +1990,9 @@ async function loadReportBody(){
   const net = grossMargin - expenses - salary;
 
   body.innerHTML = `
+    <div class="row" style="justify-content:flex-end;margin-bottom:12px;">
+      <button class="btn" id="repExport" ${window.XLSX?'':'disabled title="Excel library did not load"'}>${icon('chart')} Export to Excel</button>
+    </div>
     <div class="grid grid-kpi" style="margin-bottom:22px;">
       <div class="card kpi"><div class="label">Fuel sales</div><div class="value">${moneyShort(fuelRevenue)}</div><div class="foot">${liters(ltrTotal)}</div></div>
       <div class="card kpi"><div class="label">Oil sales</div><div class="value">${moneyShort(oilRevenue)}</div><div class="foot">total takings ${moneyShort(revenue)}</div></div>
@@ -2019,6 +2022,123 @@ async function loadReportBody(){
   `;
   drawProductChart($('#chartProduct'), byProduct);
   drawTrendChart($('#chartTrend'), byDay, monthId, dim);
+  const exportBtn = $('#repExport');
+  if (exportBtn && window.XLSX) exportBtn.onclick = ()=>exportReportExcel({
+    monthId, dayDocs, expData, salData, stockData, byProduct, payTotals,
+    summary: {fuelRevenue, oilRevenue, revenue, ltrTotal, fuelCost, grossMargin, expenses, salary, net},
+  });
+}
+
+// Builds a multi-sheet .xlsx for the month entirely in the browser (SheetJS) and triggers the
+// download. Numbers are written as numbers (not formatted strings) so Excel can total them.
+function exportReportExcel({monthId, dayDocs, expData, salData, stockData, byProduct, payTotals, summary}){
+  const r2 = (n)=> Math.round(num(n)*100)/100;
+  const wb = XLSX.utils.book_new();
+  const addSheet = (name, rows, widths)=>{
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    if (widths) ws['!cols'] = widths.map(w=>({wch:w}));
+    XLSX.utils.book_append_sheet(wb, ws, name);
+  };
+  const station = state.config.stationName || 'Fuel Ledger';
+  const label = monthLabel(monthId);
+
+  // 1. Summary / P&L
+  addSheet('Summary', [
+    [station], [`Monthly P&L — ${label}`], [],
+    ['Item', 'Amount (₹)'],
+    ['Fuel sales', r2(summary.fuelRevenue)],
+    ['Oil sales', r2(summary.oilRevenue)],
+    ['Total takings', r2(summary.revenue)],
+    ['Fuel liters sold', r2(summary.ltrTotal)],
+    ['Fuel purchase cost', r2(summary.fuelCost)],
+    ['Gross margin', r2(summary.grossMargin)],
+    ['Expenses', r2(summary.expenses)],
+    ['Salary', r2(summary.salary)],
+    ['Net P&L', r2(summary.net)],
+    [],
+    ['Collections by method', 'Amount (₹)'],
+    ['Cash', r2(payTotals.cash)], ['POS / Card', r2(payTotals.pos)], ['UPI', r2(payTotals.upi)], ['HP Card', r2(payTotals.hpCard)], ['Credit', r2(payTotals.credit)],
+    [],
+    ['Sales by product', 'Liters', 'Amount (₹)'],
+    ...PRODUCT_KEYS.map(k=>[state.config.products[k]||k, r2(byProduct[k].liters), r2(byProduct[k].amount)]),
+  ], [26, 16, 16]);
+
+  // 2. Daily sales
+  const days = dayDocs.slice().sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  addSheet('Daily sales', [
+    ['Date', 'Duties', 'Fuel liters', 'Fuel sales (₹)', 'Oil sales (₹)', 'Total (₹)'],
+    ...days.map(d=>{
+      const duties = Object.values(d.duties||{});
+      const oil = duties.reduce((s,x)=>s+num(x.oilAmount),0);
+      return [d.date, duties.length, r2(d.dayLiters), r2(num(d.dayAmount)-oil), r2(oil), r2(d.dayAmount)];
+    }),
+  ], [12, 8, 12, 14, 14, 14]);
+
+  // 3. Duties (one row per duty)
+  const dutyRows = [];
+  days.forEach(d=>Object.values(d.duties||{}).forEach(x=>{
+    const p = x.pay||{};
+    dutyRows.push([d.date, x.staffName, x.startTime||'', x.endTime||'', (x.nozzleIds||[]).length, r2(x.dutyLiters),
+      r2(x.fuelAmount!=null?x.fuelAmount:x.dutyAmount), r2(x.oilAmount), r2(x.dutyAmount),
+      r2(p.cash), r2(p.pos), r2(p.upi), r2(p.hpCard), r2(p.credit), r2(p.expenses)]);
+  }));
+  addSheet('Duties', [
+    ['Date', 'Staff', 'Start', 'End', 'Nozzles', 'Liters', 'Fuel (₹)', 'Oils (₹)', 'Total (₹)', 'Cash', 'POS', 'UPI', 'HP Card', 'Credit', 'Expenses'],
+    ...dutyRows,
+  ], [12, 18, 7, 7, 8, 10, 12, 10, 12, 12, 10, 10, 10, 10, 10]);
+
+  // 4. Nozzle readings
+  const nzRows = [];
+  days.forEach(d=>Object.values(d.duties||{}).forEach(x=>Object.entries(x.nozzles||{}).forEach(([nid,n])=>{
+    const nz = state.nozzles.find(z=>z.id===nid);
+    nzRows.push([d.date, x.staffName, nz?nz.name:nid, state.config.products[n.product]||n.product||'', r2(n.opening), r2(n.closing), r2(n.testLiters), r2(n.transferLiters), r2(n.liters), r2(n.rate), r2(n.amount)]);
+  })));
+  addSheet('Nozzle readings', [
+    ['Date', 'Staff', 'Nozzle', 'Product', 'Opening', 'Closing', 'Test (L)', 'Transfer (L)', 'Sale (L)', 'Rate', 'Amount (₹)'],
+    ...nzRows,
+  ], [12, 18, 12, 14, 12, 12, 9, 11, 10, 9, 12]);
+
+  // 5. Credit sales & oil sales
+  const crRows = [], oilRows = [];
+  days.forEach(d=>Object.values(d.duties||{}).forEach(x=>{
+    (x.creditSales||[]).forEach(c=>crRows.push([d.date, x.staffName, c.creditorName, c.indentNo||'', c.vehicleNo||'', r2(c.liters), r2(c.amount)]));
+    (x.oils||[]).forEach(o=>oilRows.push([d.date, x.staffName, o.name||'', r2(o.amount)]));
+  }));
+  addSheet('Credit sales', [['Date', 'Staff', 'Creditor', 'Indent No.', 'Vehicle No.', 'Liters', 'Amount (₹)'], ...crRows], [12, 18, 22, 12, 14, 10, 12]);
+  addSheet('Oil sales', [['Date', 'Staff', 'Oil / product', 'Amount (₹)'], ...oilRows], [12, 18, 26, 12]);
+
+  // 6. Purchases, expenses, salary
+  const purchases = ((stockData&&stockData.items)||[]).slice().sort((a,b)=>a.date.localeCompare(b.date));
+  addSheet('Purchases', [
+    ['Date', 'Product', 'Tank', 'Supplier', 'Invoice / DO', 'Liters', 'Rate', 'Amount (₹)'],
+    ...purchases.map(it=>[it.date, state.config.products[it.product]||it.product||'', it.tankName||'', it.supplier||'', it.ref||'', r2(it.liters), r2(it.rate), r2(it.amount)]),
+  ], [12, 14, 12, 16, 14, 10, 9, 12]);
+  const exps = ((expData&&expData.items)||[]).slice().sort((a,b)=>a.date.localeCompare(b.date));
+  addSheet('Expenses', [
+    ['Date', 'Category', 'Description', 'Source', 'Amount (₹)'],
+    ...exps.map(it=>[it.date, it.category||'', it.description||'', it.source==='duty'?'Duty till':'Manual', r2(it.amount)]),
+  ], [12, 22, 30, 10, 12]);
+  const sal = Object.values((salData&&salData.staff)||{});
+  addSheet('Salary', [
+    ['Staff', 'Wage type', 'Hours', 'Base (₹)', 'Advance (₹)', 'Deduction (₹)', 'Net (₹)', 'Status', 'Paid date'],
+    ...sal.map(s=>[s.name, s.wageType||'monthly', s.hoursWorked!=null?r2(s.hoursWorked):'', r2(s.baseSalary), r2(s.advance), r2(s.deduction), r2(s.netPaid), s.status||'', s.paidDate||'']),
+  ], [18, 10, 8, 12, 12, 13, 12, 9, 12]);
+
+  // 7. Current balances (as of export time)
+  addSheet('Balances', [
+    ['Creditors', 'Phone', 'Outstanding (₹)', 'Bowser stock (L)'],
+    ...state.creditors.map(c=>[c.name, c.phone||'', r2(c.balance), c.isBowser?r2(c.bowserStockL):'']),
+    [],
+    ['Accounts', 'Kind', 'Balance (₹)'],
+    ...state.accounts.map(a=>[a.name, a.kind||'', r2(a.balance)]),
+    [],
+    ['Tanks', 'Product', 'Capacity (L)', 'Current stock (L)'],
+    ...state.tanks.map(t=>[t.name, state.config.products[t.product]||t.product||'', r2(t.capacityL), r2(t.currentStockL)]),
+  ], [24, 16, 16, 16]);
+
+  const safeName = station.replace(/[^\w]+/g,'-').replace(/^-|-$/g,'');
+  XLSX.writeFile(wb, `${safeName}-${monthId}.xlsx`);
+  logActivity({entity:'Report', entityLabel:label, action:'add', summary:'Exported month to Excel'});
 }
 
 function drawProductChart(el, byProduct){
