@@ -708,7 +708,7 @@ const NAV = [
   {id:'dashboard', label:'Dashboard', icon:'home'},
   {id:'shift', label:'Duty Entry', icon:'pump'},
   {id:'stock', label:'Stock', icon:'tank'},
-  {id:'expenses', label:'Expenses', icon:'receipt'},
+  {id:'expenses', label:'Payments / Expenses', icon:'receipt'},
   {id:'salary', label:'Salary', icon:'wallet'},
   {id:'reports', label:'Reports', icon:'chart'},
   {id:'receipts', label:'Receipts', icon:'inbox'},
@@ -800,7 +800,7 @@ function renderDashboard(mount){
     <div class="section-head"><h2>Quick actions</h2></div>
     <div class="row">
       <button class="btn primary" id="qaShift">${icon('pump')} Log a duty</button>
-      <button class="btn" id="qaExpense">${icon('receipt')} Log an expense</button>
+      <button class="btn" id="qaExpense">${icon('receipt')} Log a payment / expense</button>
       <button class="btn" id="qaStock">${icon('tank')} Record fuel purchase</button>
     </div>
   `;
@@ -1664,44 +1664,89 @@ async function loadStockReceiptsList(){
 /* ============================== EXPENSES ============================== */
 const EXPENSE_CATEGORIES = ['Electricity','Maintenance & Repairs','Rent','Statutory / Tax','Bank & Card Charges','Transport','Miscellaneous'];
 
+// Payments / Expenses share one monthly document (expensesMonthly). An item is either
+//   kind:'expense'  — a running cost by category; counts in the P&L expenses line
+//   kind:'payment'  — money paid to a party (supplier, lender, staff advance, owner…), optionally
+//                     debited to a ledger so it settles a payable / records an advance / hits P&L.
+// Both record the mode and where the money came from (Cash in hand or a bank account), and post
+// the outflow there. Items with source:'duty' are mirrored from Duty Entry and edited there.
+function expenseKind(it){ return it.kind==='payment' ? 'payment' : 'expense'; }
+function paidFromLabel(k){ return !k ? 'Not tracked' : k==='cash' ? 'Cash in hand' : ((state.accounts.find(a=>'acct:'+a.id===k)||{}).name || k); }
+async function applyExpenseItem(item, sign){
+  const amt = num(item.amount) * sign;
+  if (!amt) return;
+  const who = expenseKind(item)==='payment' ? (item.party||'payment') : (item.category||'expense');
+  const meta = {date:item.date, narration:`${expenseKind(item)==='payment'?'Payment to':'Expense —'} ${who}${item.description?' — '+item.description:''}`, journalId:item.id};
+  if (item.paidFrom) await applyPosting(item.paidFrom, -amt, meta);            // money out
+  if (expenseKind(item)==='payment' && item.ledger) await applyPosting(item.ledger, amt, meta); // settles / records on the ledger
+}
+
 function renderExpenses(mount){
   mount.innerHTML = `
-    <h1 class="page-title">Expenses</h1>
-    <p class="page-sub">Running costs outside fuel purchase and salary — feeds the monthly P&amp;L.</p>
+    <h1 class="page-title">Payments / Expenses</h1>
+    <p class="page-sub">Money going out — running <strong>expenses</strong> by category (they feed the P&amp;L) or <strong>payments</strong> to a party such as a supplier, lender or staff advance.</p>
 
     <div class="card card-pad" style="margin-bottom:16px;">
       <div class="form-grid">
         <div class="field"><label>Date</label><input type="date" id="exDate" value="${todayStr()}" max="${todayStr()}"></div>
-        <div class="field"><label>Category</label><select id="exCat">${EXPENSE_CATEGORIES.map(c=>`<option>${c}</option>`).join('')}</select></div>
-        <div class="field" style="grid-column:span 2;"><label>Description</label><input type="text" id="exDesc" placeholder="e.g. July electricity bill"></div>
+        <div class="field"><label>Type</label><select id="exKind"><option value="expense">Expense (by category)</option><option value="payment">Payment (to a party)</option></select></div>
+        <div class="field" id="exCatWrap"><label>Category</label><select id="exCat">${EXPENSE_CATEGORIES.map(c=>`<option>${c}</option>`).join('')}</select></div>
+        <div class="field" id="exPartyWrap" style="display:none;"><label>Paid to (party)</label><input type="text" id="exParty" list="exPartyList" placeholder="e.g. HPCL / Ravi (advance) / Bank loan">
+          <datalist id="exPartyList">${state.suppliers.filter(s=>s.active!==false).map(s=>`<option value="${esc(s.name)}">`).join('')}${state.staff.filter(s=>s.active!==false).map(s=>`<option value="${esc(s.name)}">`).join('')}</datalist></div>
+        <div class="field" id="exLedgerWrap" style="display:none;"><label>Debit to ledger (optional)</label><select id="exLedger">${receiptLedgerOptions('')}</select></div>
+        <div class="field" style="grid-column:span 2;"><label>Description</label><input type="text" id="exDesc" placeholder="e.g. July electricity bill / Invoice DO-4521"></div>
         <div class="field"><label>Amount (₹)</label><input type="number" step="0.01" id="exAmt" placeholder="0.00"></div>
-        <div class="field"><button class="btn primary" id="exSave" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add expense</button></div>
+        <div class="field"><label>Mode</label><select id="exMode">${RECEIPT_MODES.map(m=>`<option>${m}</option>`).join('')}</select></div>
+        <div class="field"><label>Paid from</label><select id="exFrom"><option value="">Not tracked</option>${receiptIntoOptions('cash')}</select></div>
+        <div class="field"><button class="btn primary" id="exSave" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} <span id="exSaveLbl">Add expense</span></button></div>
       </div>
+      <div class="hint" style="color:var(--text-faint);font-size:12px;">"Paid from" reduces that cash / bank balance. For a payment, pick a <strong>Liability / Payable</strong> ledger to settle a due, an <strong>Asset</strong> ledger for an advance or deposit, or an <strong>Expense</strong> ledger if it should hit the P&amp;L.</div>
       <div id="exMsg" style="font-size:13px;margin-top:4px;"></div>
     </div>
 
     <div class="section-head"><h2>This period</h2><span id="exMonthLabel"></span></div>
     <div id="exList"></div>
   `;
+  const syncKind = ()=>{
+    const pay = $('#exKind').value==='payment';
+    $('#exCatWrap').style.display = pay ? 'none' : '';
+    $('#exPartyWrap').style.display = pay ? '' : 'none';
+    $('#exLedgerWrap').style.display = pay ? '' : 'none';
+    $('#exSaveLbl').textContent = pay ? 'Add payment' : 'Add expense';
+    $('#exMode').value = pay ? 'Bank transfer' : 'Cash';
+    $('#exFrom').value = pay ? ($('#exFrom').querySelector('option[value^="acct:"]') ? $('#exFrom').querySelector('option[value^="acct:"]').value : 'cash') : 'cash';
+  };
+  $('#exKind').onchange = syncKind; syncKind();
   $('#exSave').onclick = addExpense;
   loadExpensesList();
 }
 
 async function addExpense(){
   const msg = $('#exMsg');
-  const date = $('#exDate').value, cat = $('#exCat').value, desc = $('#exDesc').value.trim(), amt = num($('#exAmt').value);
+  const kind = $('#exKind').value;
+  const item = {
+    id:uid(), date:$('#exDate').value, kind,
+    category: kind==='expense' ? $('#exCat').value : '',
+    party: kind==='payment' ? $('#exParty').value.trim() : '',
+    ledger: kind==='payment' ? $('#exLedger').value : '',
+    description:$('#exDesc').value.trim(), amount:num($('#exAmt').value),
+    mode:$('#exMode').value, paidFrom:$('#exFrom').value,
+    by: state.currentUser?state.currentUser.name:'', savedAt:new Date().toISOString(),
+  };
   if (!state.dbReady){ msg.innerHTML = `<span style="color:var(--critical)">Live data isn't connected.</span>`; return; }
-  if (!(amt>0)){ msg.innerHTML = `<span style="color:var(--critical)">Enter an amount.</span>`; return; }
+  if (kind==='payment' && !item.party){ msg.innerHTML = `<span style="color:var(--critical)">Enter who the payment was made to.</span>`; return; }
+  if (!(item.amount>0)){ msg.innerHTML = `<span style="color:var(--critical)">Enter an amount.</span>`; return; }
   $('#exSave').disabled = true;
   try{
-    const monthId = monthIdOf(date);
+    const monthId = monthIdOf(item.date);
     const data = (await getMonthDoc('expensesMonthly', monthId)) || {items:[], total:0};
-    data.items = (data.items||[]).concat([{id:uid(), date, category:cat, description:desc, amount:amt}]);
-    data.total = (data.total||0) + amt;
+    data.items = (data.items||[]).concat([item]);
+    data.total = data.items.reduce((s,i)=>s+num(i.amount),0);
     await setMonthDoc('expensesMonthly', monthId, data);
-    await logActivity({entity:'Expense', entityLabel:cat+(desc?' · '+desc:''), action:'add', summary:`Added ${money(amt)}`});
-    msg.innerHTML = `<span style="color:var(--good)">Expense added.</span>`;
-    $('#exDesc').value=''; $('#exAmt').value='';
+    await applyExpenseItem(item, +1);
+    await logActivity({entity: kind==='payment'?'Payment':'Expense', entityLabel:(kind==='payment'?item.party:item.category)+(item.description?' · '+item.description:''), action:'add', summary:`Added ${money(item.amount)} by ${item.mode}${item.paidFrom?' from '+paidFromLabel(item.paidFrom):''}`});
+    msg.innerHTML = `<span style="color:var(--good)">${kind==='payment'?'Payment':'Expense'} added.</span>`;
+    $('#exDesc').value=''; $('#exAmt').value=''; if ($('#exParty')) $('#exParty').value='';
     loadExpensesList();
   }catch(e){ msg.innerHTML = `<span style="color:var(--critical)">Couldn't save: ${esc(e.message||'error')}</span>`; }
   finally{ $('#exSave').disabled=false; }
@@ -1711,33 +1756,50 @@ async function removeExpense(monthId, itemId){
   const data = await getMonthDoc('expensesMonthly', monthId);
   if (!data) return;
   const item = (data.items||[]).find(i=>i.id===itemId);
+  if (!item) return;
+  const ok = await confirmModal({title:`Delete this ${expenseKind(item)}?`, body: item.paidFrom ? 'This removes it and adds the amount back to '+paidFromLabel(item.paidFrom)+'.' : 'This removes it from the list.', confirmLabel:'Delete'});
+  if (!ok) return;
   data.items = (data.items||[]).filter(i=>i.id!==itemId);
-  data.total = Math.max(0, (data.total||0) - (item?item.amount:0));
+  data.total = data.items.reduce((s,i)=>s+num(i.amount),0);
   await setMonthDoc('expensesMonthly', monthId, data);
-  if (item) await logActivity({entity:'Expense', entityLabel:item.category+(item.description?' · '+item.description:''), action:'delete', summary:`Removed ${money(item.amount)}`});
+  await applyExpenseItem(item, -1);
+  await logActivity({entity: expenseKind(item)==='payment'?'Payment':'Expense', entityLabel:(item.party||item.category||'')+(item.description?' · '+item.description:''), action:'delete', summary:`Removed ${money(item.amount)}`});
   loadExpensesList();
 }
 
-const EXPENSE_EDIT_FIELDS = [
-  {key:'date', label:'Date', type:'date'},
-  {key:'category', label:'Category', type:'select', options:EXPENSE_CATEGORIES.map(c=>({value:c,label:c}))},
-  {key:'description', label:'Description', type:'text'},
-  {key:'amount', label:'Amount (₹)', type:'number', fmt:v=>money(v)},
-];
+function expenseEditFields(item){
+  const fromOpts = [{value:'', label:'Not tracked'},{value:'cash', label:'Cash in hand'}].concat(state.accounts.filter(a=>a.kind==='bank').map(a=>({value:'acct:'+a.id, label:a.name})));
+  return [
+    {key:'date', label:'Date', type:'date'},
+    ...(expenseKind(item)==='payment'
+      ? [{key:'party', label:'Paid to (party)', type:'text'}, {key:'ledger', label:'Debit to ledger', type:'select', options:[{value:'',label:'— none —'}].concat(state.ledgers.filter(l=>!l.cashInHand).map(l=>({value:'led:'+l.id,label:l.name}))), fmt:v=>targetLabel(v)||'—'}]
+      : [{key:'category', label:'Category', type:'select', options:EXPENSE_CATEGORIES.map(c=>({value:c,label:c}))}]),
+    {key:'description', label:'Description', type:'text'},
+    {key:'amount', label:'Amount (₹)', type:'number', fmt:v=>money(v)},
+    {key:'mode', label:'Mode', type:'select', options:RECEIPT_MODES.map(m=>({value:m,label:m}))},
+    {key:'paidFrom', label:'Paid from', type:'select', options:fromOpts, fmt:v=>paidFromLabel(v)},
+  ];
+}
 function editExpense(monthId, item){
+  const fields = expenseEditFields(item);
   openLineEditModal({
-    title:'Edit expense', fields:EXPENSE_EDIT_FIELDS, values:item,
+    title:`Edit ${expenseKind(item)}`, fields, values:Object.assign({mode:'Cash', paidFrom:''}, item),
     onSave: async (out)=>{
       if (!state.dbReady) throw new Error("Live data isn't connected.");
-      const data = await getMonthDoc('expensesMonthly', monthId);
-      if (!data) throw new Error('Record not found.');
-      const idx = (data.items||[]).findIndex(i=>i.id===item.id);
-      if (idx<0) throw new Error('Record not found.');
-      const changes = diffFields(EXPENSE_EDIT_FIELDS, item, out);
-      data.items = data.items.map((i,ix)=> ix===idx ? Object.assign({}, i, out, {id:item.id}) : i);
-      data.total = data.items.reduce((s,i)=>s+num(i.amount),0);
-      await setMonthDoc('expensesMonthly', monthId, data);
-      if (changes.length) await logActivity({entity:'Expense', entityLabel:out.category+(out.description?' · '+out.description:''), action:'edit', changes});
+      if (!(num(out.amount)>0)) throw new Error('Enter an amount.');
+      if (expenseKind(item)==='payment' && !out.party) throw new Error('Enter the party.');
+      const changes = diffFields(fields, item, out);
+      const newItem = Object.assign({}, item, out, {id:item.id});
+      const newMonth = monthIdOf(out.date);
+      await applyExpenseItem(item, -1);
+      const oldData = await getMonthDoc('expensesMonthly', monthId);
+      if (oldData){ oldData.items = (oldData.items||[]).filter(i=>i.id!==item.id); oldData.total = oldData.items.reduce((s,i)=>s+num(i.amount),0); await setMonthDoc('expensesMonthly', monthId, oldData); }
+      const newData = (newMonth===monthId && oldData) ? oldData : ((await getMonthDoc('expensesMonthly', newMonth)) || {items:[], total:0});
+      newData.items = (newData.items||[]).concat([newItem]);
+      newData.total = newData.items.reduce((s,i)=>s+num(i.amount),0);
+      await setMonthDoc('expensesMonthly', newMonth, newData);
+      await applyExpenseItem(newItem, +1);
+      if (changes.length) await logActivity({entity: expenseKind(item)==='payment'?'Payment':'Expense', entityLabel:(newItem.party||newItem.category||'')+(newItem.description?' · '+newItem.description:''), action:'edit', changes});
       loadExpensesList();
     }
   });
@@ -1750,10 +1812,21 @@ async function loadExpensesList(){
   $('#exMonthLabel') && ($('#exMonthLabel').innerHTML = monthSwitcherHtml());
   const data = await getMonthDoc('expensesMonthly', monthId);
   const items = (data && data.items || []).slice().sort((a,b)=>b.date.localeCompare(a.date));
+  const expTotal = items.filter(i=>expenseKind(i)==='expense').reduce((s,i)=>s+num(i.amount),0);
+  const payTotal = items.filter(i=>expenseKind(i)==='payment').reduce((s,i)=>s+num(i.amount),0);
   el.innerHTML = `<div class="card"><div class="table-wrap"><table>
-    <thead><tr><th>Date</th><th>Category</th><th>Description</th><th class="num">Amount</th><th></th></tr></thead>
-    <tbody>${items.length? items.map(it=>`<tr><td>${fmtDateLabel(it.date)}</td><td>${esc(it.category)}</td><td>${esc(it.description||'—')}${it.source==='duty'?`<div class="hint" style="font-size:11px;color:var(--text-faint)">from a duty entry</div>`:''}</td><td class="num">${money(it.amount)}</td><td>${it.source==='duty' ? `<span class="hint" style="font-size:11px;color:var(--text-faint)">Edit via the duty</span>` : `<button class="btn ghost sm" data-edit="${it.id}">${icon('edit')}</button> <button class="btn ghost sm" data-rm="${it.id}">${icon('trash')}</button>`}</td></tr>`).join('') : `<tr><td colspan="5" class="empty">No expenses logged for ${monthLabel(monthId)}.</td></tr>`}</tbody>
-    ${items.length?`<tfoot><tr><td colspan="3" style="font-weight:700;">Total</td><td class="num" style="font-weight:700;">${money(data.total)}</td><td></td></tr></tfoot>`:''}
+    <thead><tr><th>Date</th><th>Type</th><th>Category / Party</th><th>Description</th><th>Mode</th><th>Paid from</th><th class="num">Amount</th><th></th></tr></thead>
+    <tbody>${items.length? items.map(it=>`<tr>
+      <td style="white-space:nowrap;">${fmtDateLabel(it.date)}</td>
+      <td><span class="pill ${expenseKind(it)==='payment'?'neutral':'warning'}">${expenseKind(it)==='payment'?'Payment':'Expense'}</span></td>
+      <td>${esc(expenseKind(it)==='payment' ? (it.party||'—') : (it.category||'—'))}${it.ledger?`<div class="hint" style="font-size:11px;color:var(--text-faint)">→ ${esc(targetLabel(it.ledger)||'')}</div>`:''}</td>
+      <td>${esc(it.description||'—')}${it.source==='duty'?`<div class="hint" style="font-size:11px;color:var(--text-faint)">from a duty entry (paid from till)</div>`:''}</td>
+      <td>${esc(it.mode||(it.source==='duty'?'Cash':'—'))}</td>
+      <td>${esc(it.source==='duty' ? 'Duty till' : paidFromLabel(it.paidFrom))}</td>
+      <td class="num">${money(it.amount)}</td>
+      <td style="white-space:nowrap;">${it.source==='duty' ? `<span class="hint" style="font-size:11px;color:var(--text-faint)">Edit via the duty</span>` : `<button class="btn ghost sm" data-edit="${it.id}">${icon('edit')}</button> <button class="btn ghost sm" data-rm="${it.id}">${icon('trash')}</button>`}</td>
+    </tr>`).join('') : `<tr><td colspan="8" class="empty">Nothing logged for ${monthLabel(monthId)}.</td></tr>`}</tbody>
+    ${items.length?`<tfoot><tr><td colspan="6" style="font-weight:700;">Expenses ${money(expTotal)} · Payments ${money(payTotal)}</td><td class="num" style="font-weight:700;">${money(expTotal+payTotal)}</td><td></td></tr></tfoot>`:''}
   </table></div></div>`;
   $$('#exList [data-rm]').forEach(b=>b.onclick=()=>removeExpense(monthId, b.dataset.rm));
   $$('#exList [data-edit]').forEach(b=>b.onclick=()=>{
@@ -1978,6 +2051,7 @@ const REPORT_SECTIONS = [
   {id:'oils',        label:'Oil sales'},
   {id:'purchases',   label:'Fuel purchases'},
   {id:'expenses',    label:'Expenses'},
+  {id:'payments',    label:'Payments'},
   {id:'salary',      label:'Salary'},
   {id:'journal',     label:'Journal entries'},
   {id:'receipts',    label:'Receipts'},
@@ -2056,7 +2130,7 @@ async function computeReport(from, to, f){
   const r = { from, to, days:daysBetween(from,to), revenue:0, fuelRevenue:0, oilRevenue:0, liters:0,
     byProduct:{p1:{liters:0,amount:0}, p2:{liters:0,amount:0}, p3:{liters:0,amount:0}}, byDay:{},
     payTotals: entryFiltered ? null : {pos:0, upi:0, hpCard:0, credit:0, cash:0, expenses:0},
-    duties:[], creditSales:[], oils:[], purchases:[], expenses:[], salaryRows:[], salary:0, journal:[], receipts:[], nozzleRows:[] };
+    duties:[], creditSales:[], oils:[], purchases:[], expenses:[], payments:[], salaryRows:[], salary:0, journal:[], receipts:[], nozzleRows:[] };
   dayDocs.forEach(doc=>{
     Object.entries(doc.duties||{}).forEach(([dutyId,x])=>{
       if (f.staff && x.staffId!==f.staff) return;
@@ -2088,7 +2162,7 @@ async function computeReport(from, to, f){
     const st = await getMonthDoc('stockReceiptsMonthly', m);
     ((st&&st.items)||[]).forEach(it=>{ if (inRange(it.date) && (!productFilter || it.product===productFilter)) r.purchases.push(it); });
     const ex = await getMonthDoc('expensesMonthly', m);
-    ((ex&&ex.items)||[]).forEach(it=>{ if (inRange(it.date)) r.expenses.push(it); });
+    ((ex&&ex.items)||[]).forEach(it=>{ if (!inRange(it.date)) return; if (expenseKind(it)==='payment') r.payments.push(it); else r.expenses.push(it); });
     const jn = await getMonthDoc('journalMonthly', m);
     ((jn&&jn.items)||[]).forEach(it=>{ if (inRange(it.date)) r.journal.push(it); });
     const rc = await getMonthDoc('receiptsMonthly', m);
@@ -2099,7 +2173,7 @@ async function computeReport(from, to, f){
   }
   r.fuelCost = r.purchases.reduce((s,i)=>s+num(i.amount),0);
   r.expenseTotal = r.expenses.reduce((s,i)=>s+num(i.amount),0);
-  const pl = journalPL({items:r.journal}, {items:r.receipts});
+  const pl = journalPL({items:r.journal}, {items:r.receipts}, {items:r.payments});
   r.otherIncome = pl.income; r.otherExpense = pl.expense;
   r.grossMargin = r.revenue - r.fuelCost;
   r.net = r.grossMargin - r.expenseTotal - r.salary + r.otherIncome - r.otherExpense;
@@ -2221,7 +2295,7 @@ function renderReportBody(body, cfg, r, c){
     ${kpi('Expenses', r.expenseTotal, P('expenseTotal'), '', {lowerIsBetter:true})}
     ${kpi('Salary', r.salary, P('salary'), '', {lowerIsBetter:true})}
     ${kpi('Other income', r.otherIncome, P('otherIncome'), 'journal + receipts')}
-    ${kpi('Other expenses', r.otherExpense, P('otherExpense'), 'journal', {lowerIsBetter:true})}
+    ${kpi('Other expenses', r.otherExpense, P('otherExpense'), 'journal + payments', {lowerIsBetter:true})}
     ${kpi('Net P&L', r.net, P('net'), '', {signColor:true})}
     ${kpi('Fuel liters', r.liters, P('liters'), '', {fmt:liters})}
   </div>`);
@@ -2285,6 +2359,11 @@ function renderReportBody(body, cfg, r, c){
     const rows = r.expenses.slice().sort(sortD);
     parts.push(table('Expenses', [{label:'Date'},{label:'Category'},{label:'Description'},{label:'Source'},{label:'Amount',num:true}],
       rows.map(it=>[fmtDateLabel(it.date), esc(it.category||''), esc(it.description||'—'), it.source==='duty'?'Duty till':'Manual', money(it.amount)]), ['Total','','','', money(r.expenseTotal)]));
+  }
+  if (has('payments')){
+    const rows = r.payments.slice().sort(sortD);
+    parts.push(table('Payments', [{label:'Date'},{label:'Paid to'},{label:'Description'},{label:'Mode'},{label:'Paid from'},{label:'Ledger'},{label:'Amount',num:true}],
+      rows.map(it=>[fmtDateLabel(it.date), esc(it.party||'—'), esc(it.description||'—'), esc(it.mode||'—'), esc(paidFromLabel(it.paidFrom)), esc(targetLabel(it.ledger)||'—'), money(it.amount)]), ['Total','','','','','', money(rows.reduce((s,i)=>s+num(i.amount),0))]));
   }
   if (has('salary')){
     const rows = r.salaryRows.slice().sort((a,b)=>b.month.localeCompare(a.month) || (a.name||'').localeCompare(b.name||''));
@@ -2368,6 +2447,7 @@ function exportReportExcel(rep){
   if (has('oils')) addSheet('Oil sales', [['Date', 'Staff', 'Oil / product', 'Amount (₹)'], ...r.oils.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(o=>[o.date, o.staffName, o.name||'', r2(o.amount)])], [12, 18, 26, 12]);
   if (has('purchases')) addSheet('Purchases', [['Date', 'Product', 'Tank', 'Supplier', 'Invoice / DO', 'Liters', 'Rate', 'Amount (₹)'], ...r.purchases.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, state.config.products[it.product]||it.product||'', it.tankName||'', it.supplier||'', it.ref||'', r2(it.liters), r2(it.rate), r2(it.amount)])], [12, 14, 12, 16, 14, 10, 9, 12]);
   if (has('expenses')) addSheet('Expenses', [['Date', 'Category', 'Description', 'Source', 'Amount (₹)'], ...r.expenses.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, it.category||'', it.description||'', it.source==='duty'?'Duty till':'Manual', r2(it.amount)])], [12, 22, 30, 10, 12]);
+  if (has('payments')) addSheet('Payments', [['Date', 'Paid to', 'Description', 'Mode', 'Paid from', 'Ledger', 'Amount (₹)'], ...r.payments.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, it.party||'', it.description||'', it.mode||'', paidFromLabel(it.paidFrom), targetLabel(it.ledger)||'', r2(it.amount)])], [12, 22, 30, 12, 16, 22, 12]);
   if (has('salary')) addSheet('Salary', [['Month', 'Staff', 'Wage type', 'Hours', 'Base (₹)', 'Advance (₹)', 'Deduction (₹)', 'Net (₹)', 'Status', 'Paid date'], ...r.salaryRows.map(s=>[s.month, s.name, s.wageType||'monthly', s.hoursWorked!=null?r2(s.hoursWorked):'', r2(s.baseSalary), r2(s.advance), r2(s.deduction), r2(s.netPaid), s.status||'', s.paidDate||''])], [10, 18, 10, 8, 12, 12, 13, 12, 9, 12]);
   if (has('journal')) addSheet('Journal', [['Date', 'Debit (Dr)', 'Credit (Cr)', 'Amount (₹)', 'Narration', 'By'], ...r.journal.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, targetLabel(it.debit)||it.debitLabel||'', targetLabel(it.credit)||it.creditLabel||'', r2(it.amount), it.narration||'', it.by||''])], [12, 28, 28, 12, 36, 14]);
   if (has('receipts')) addSheet('Receipts', [['Date', 'From', 'Type', 'Amount (₹)', 'Into', 'Mode', 'Reference', 'Narration', 'Ledger', 'By'], ...r.receipts.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, receiptFromLabel(it), it.type==='creditor'?'Creditor':'Other', r2(it.amount), it.into==='cash'?'Cash in hand':((state.accounts.find(a=>'acct:'+a.id===it.into)||{}).name||''), it.mode||'', it.reference||'', it.narration||'', targetLabel(it.ledger)||'', it.by||''])], [12, 24, 10, 12, 18, 12, 14, 30, 22, 14]);
@@ -2505,7 +2585,7 @@ async function applyJournalItem(item, sign){
   await applyPosting(item.credit, -amt, meta);
 }
 // P&L effect of a month's journal: income = net credits to income ledgers, expense = net debits to expense ledgers.
-function journalPL(journalData, receiptsData){
+function journalPL(journalData, receiptsData, paymentsData){
   let income=0, expense=0;
   const groupOf = (key)=>{ if (!key || !key.startsWith('led:')) return null; const l = state.ledgers.find(x=>x.id===key.slice(4)); return l ? l.group : null; };
   ((journalData&&journalData.items)||[]).forEach(it=>{
@@ -2517,6 +2597,10 @@ function journalPL(journalData, receiptsData){
   ((receiptsData&&receiptsData.items)||[]).forEach(it=>{
     const g = groupOf(it.ledger); const a = num(it.amount);
     if (g==='income') income += a; if (g==='expense') expense -= a;
+  });
+  ((paymentsData&&paymentsData.items)||[]).forEach(it=>{
+    const g = groupOf(it.ledger); const a = num(it.amount);
+    if (g==='expense') expense += a; if (g==='income') income -= a;
   });
   return {income, expense};
 }
@@ -3554,7 +3638,7 @@ function renderSetupTools(body){
     </div>
     <div class="card card-pad" style="margin-top:16px;">
       <h3 style="margin-top:0;font-size:14px;">Recalculate Cash in hand</h3>
-      <p class="hint" style="color:var(--text-muted);font-size:13px;">Rebuilds the Cash in hand ledger from its opening balance + every duty's cash takings + receipts into cash + journal postings to cash. Run this once after upgrading (duties saved before cash tracking existed aren't in the balance yet), or whenever the figure looks off.</p>
+      <p class="hint" style="color:var(--text-muted);font-size:13px;">Rebuilds the Cash in hand ledger from its opening balance + every duty's cash takings + receipts into cash − payments &amp; expenses paid from cash + journal postings to cash. Run this once after upgrading (duties saved before cash tracking existed aren't in the balance yet), or whenever the figure looks off.</p>
       <button class="btn" id="toolRecalcCash" ${state.dbReady?'':'disabled'}>Recalculate cash</button>
       <div id="toolCashMsg" style="font-size:13px;margin-top:8px;"></div>
     </div>
@@ -3579,19 +3663,21 @@ function renderSetupTools(body){
       const months = [];
       let cursor = monthIdOf(todayStr());
       for (let i=0;i<36;i++){ months.push(cursor); cursor = shiftMonth(cursor,-1); }
-      let dutyCash=0, receiptCash=0, journalCash=0;
+      let dutyCash=0, receiptCash=0, journalCash=0, paidCash=0;
       const logsSnap = await state.db.collection('dailyLogs').limit(1000).get();
       logsSnap.docs.forEach(d=>Object.values(d.data().duties||{}).forEach(x=>{ dutyCash += num(x.pay && x.pay.cash); }));
       for (const m of months){
         const r = await state.db.doc('receiptsMonthly/'+m).get();
         if (r.exists) (r.data().items||[]).forEach(it=>{ if ((it.into||'cash')==='cash') receiptCash += num(it.amount); });
+        const ex = await state.db.doc('expensesMonthly/'+m).get();
+        if (ex.exists) (ex.data().items||[]).forEach(it=>{ if (it.paidFrom==='cash') paidCash += num(it.amount); });
         const j = await state.db.doc('journalMonthly/'+m).get();
         if (j.exists) (j.data().items||[]).forEach(it=>{ if (it.debit==='cash') journalCash += num(it.amount); if (it.credit==='cash') journalCash -= num(it.amount); });
       }
-      const balance = num(cashLedger.openingBalance) + dutyCash + receiptCash + journalCash;
+      const balance = num(cashLedger.openingBalance) + dutyCash + receiptCash - paidCash + journalCash;
       await state.db.doc('ledgers/'+cashLedger.id).update({balance});
       await logActivity({entity:'Ledger', entityLabel:'Cash in hand', action:'edit', changes:[{field:'Balance', from:ledgerBalanceLabel(cashLedger.balance), to:ledgerBalanceLabel(balance)}], summary:'Recalculated from history'});
-      msg.innerHTML = `<span style="color:var(--good)">Done — Cash in hand is now ${ledgerBalanceLabel(balance)} (opening ${money(cashLedger.openingBalance)} + duty cash ${money(dutyCash)} + receipts ${money(receiptCash)} ${journalCash<0?'−':'+'} journal ${money(Math.abs(journalCash))}).</span>`;
+      msg.innerHTML = `<span style="color:var(--good)">Done — Cash in hand is now ${ledgerBalanceLabel(balance)} (opening ${money(cashLedger.openingBalance)} + duty cash ${money(dutyCash)} + receipts ${money(receiptCash)} − payments/expenses from cash ${money(paidCash)} ${journalCash<0?'−':'+'} journal ${money(Math.abs(journalCash))}).</span>`;
     }catch(e){ msg.innerHTML = `<span style="color:var(--critical)">${esc(e.message||'Failed')}</span>`; }
   };
   $('#toolRecalc').onclick = async ()=>{
