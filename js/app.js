@@ -57,6 +57,7 @@ function icon(name){
     trash:'<path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0-.8 12.2a2 2 0 0 1-2 1.8H9.8a2 2 0 0 1-2-1.8L7 7"/>',
     edit:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
     clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
+    book:'<path d="M4 4h6a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H4Z"/><path d="M20 4h-6a3 3 0 0 0-3 3v13a2 2 0 0 1 2-2h7Z"/>',
   };
   return '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+(paths[name]||'')+'</svg>';
 }
@@ -345,7 +346,7 @@ const state = {
   db: null,
   dbReady: false,
   config: { stationName:'Conztant Petroleum Retailers', products:{p1:'Petrol (MS)',p2:'Diesel (HSD)',p3:'Power / XP'} },
-  tanks: [], nozzles: [], staff: [], creditors: [], suppliers: [], accounts: [],
+  tanks: [], nozzles: [], staff: [], creditors: [], suppliers: [], accounts: [], ledgers: [],
   users: [], usersLoaded: false, currentUser: null,
   ratesFlat: {},        // 'YYYY-MM-DD' -> {p1,r2,p3}
   ratesLoadedMonths: new Set(),
@@ -424,6 +425,11 @@ function subscribeMasters(){
     refreshView();
   }, ()=>{});
 
+  db.collection('ledgers').onSnapshot(qs=>{
+    state.ledgers = qs.docs.map(d=>Object.assign({id:d.id}, d.data()));
+    refreshView();
+  }, ()=>{});
+
   db.collection('users').onSnapshot(qs=>{
     state.users = qs.docs.map(d=>Object.assign({id:d.id}, d.data()));
     state.usersLoaded = true;
@@ -458,8 +464,8 @@ function loadTodayLog(){
 // no server-side rule layer behind the db capability, so this is a front-door convenience for a
 // shared terminal, not a hard security boundary. See the login screen's own note to the owner.
 const ROLE_TABS = {
-  owner:   ['dashboard','shift','stock','expenses','salary','reports','activity','setup'],
-  manager: ['dashboard','shift','stock','expenses','salary','reports'],
+  owner:   ['dashboard','shift','stock','expenses','salary','reports','journal','activity','setup'],
+  manager: ['dashboard','shift','stock','expenses','salary','reports','journal'],
   staff:   ['dashboard','shift'],
 };
 const ROLE_LABEL = {owner:'Owner', manager:'Manager', staff:'Staff'};
@@ -701,6 +707,7 @@ const NAV = [
   {id:'expenses', label:'Expenses', icon:'receipt'},
   {id:'salary', label:'Salary', icon:'wallet'},
   {id:'reports', label:'Reports', icon:'chart'},
+  {id:'journal', label:'Journal', icon:'book'},
   {id:'activity', label:'Activity Log', icon:'clock'},
   {id:'setup', label:'Setup', icon:'gear'},
 ];
@@ -753,6 +760,7 @@ function renderCurrentView(){
     case 'expenses': renderExpenses(mount); break;
     case 'salary': renderSalary(mount); break;
     case 'reports': renderReports(mount); break;
+    case 'journal': renderJournal(mount); break;
     case 'activity': renderActivityLog(mount); break;
     case 'setup': renderSetup(mount); break;
   }
@@ -1962,6 +1970,7 @@ async function loadReportBody(){
   const dayDocs = await getMonthDailyLogs(monthId);
   const expData = await getMonthDoc('expensesMonthly', monthId);
   const salData = await getMonthDoc('salaryMonthly', monthId);
+  const jnlData = await getMonthDoc('journalMonthly', monthId);
   const stockData = await getMonthDoc('stockReceiptsMonthly', monthId);
 
   let revenue=0, oilRevenue=0, ltrTotal=0;
@@ -1987,7 +1996,8 @@ async function loadReportBody(){
   const grossMargin = revenue - fuelCost;
   const expenses = (expData && expData.total) || 0;
   const salary = (salData && salData.totalAccrued) || 0;
-  const net = grossMargin - expenses - salary;
+  const jnl = journalPL(jnlData);
+  const net = grossMargin - expenses - salary + jnl.income - jnl.expense;
 
   body.innerHTML = `
     <div class="row" style="justify-content:flex-end;margin-bottom:12px;">
@@ -2000,6 +2010,8 @@ async function loadReportBody(){
       <div class="card kpi"><div class="label">Gross margin</div><div class="value ${grossMargin>=0?'good':'critical'}">${moneyShort(grossMargin)}</div></div>
       <div class="card kpi"><div class="label">Expenses</div><div class="value">${moneyShort(expenses)}</div></div>
       <div class="card kpi"><div class="label">Salary</div><div class="value">${moneyShort(salary)}</div></div>
+      <div class="card kpi"><div class="label">Other income</div><div class="value">${moneyShort(jnl.income)}</div><div class="foot">from journal</div></div>
+      <div class="card kpi"><div class="label">Other expenses</div><div class="value">${moneyShort(jnl.expense)}</div><div class="foot">from journal</div></div>
       <div class="card kpi"><div class="label">Net P&amp;L</div><div class="value ${net>=0?'good':'critical'}">${moneyShort(net)}</div></div>
     </div>
 
@@ -2024,14 +2036,14 @@ async function loadReportBody(){
   drawTrendChart($('#chartTrend'), byDay, monthId, dim);
   const exportBtn = $('#repExport');
   if (exportBtn && window.XLSX) exportBtn.onclick = ()=>exportReportExcel({
-    monthId, dayDocs, expData, salData, stockData, byProduct, payTotals,
-    summary: {fuelRevenue, oilRevenue, revenue, ltrTotal, fuelCost, grossMargin, expenses, salary, net},
+    monthId, dayDocs, expData, salData, stockData, jnlData, byProduct, payTotals,
+    summary: {fuelRevenue, oilRevenue, revenue, ltrTotal, fuelCost, grossMargin, expenses, salary, otherIncome:jnl.income, otherExpense:jnl.expense, net},
   });
 }
 
 // Builds a multi-sheet .xlsx for the month entirely in the browser (SheetJS) and triggers the
 // download. Numbers are written as numbers (not formatted strings) so Excel can total them.
-function exportReportExcel({monthId, dayDocs, expData, salData, stockData, byProduct, payTotals, summary}){
+function exportReportExcel({monthId, dayDocs, expData, salData, stockData, jnlData, byProduct, payTotals, summary}){
   const r2 = (n)=> Math.round(num(n)*100)/100;
   const wb = XLSX.utils.book_new();
   const addSheet = (name, rows, widths)=>{
@@ -2054,6 +2066,8 @@ function exportReportExcel({monthId, dayDocs, expData, salData, stockData, byPro
     ['Gross margin', r2(summary.grossMargin)],
     ['Expenses', r2(summary.expenses)],
     ['Salary', r2(summary.salary)],
+    ['Other income (journal)', r2(summary.otherIncome)],
+    ['Other expenses (journal)', r2(summary.otherExpense)],
     ['Net P&L', r2(summary.net)],
     [],
     ['Collections by method', 'Amount (₹)'],
@@ -2124,8 +2138,18 @@ function exportReportExcel({monthId, dayDocs, expData, salData, stockData, byPro
     ...sal.map(s=>[s.name, s.wageType||'monthly', s.hoursWorked!=null?r2(s.hoursWorked):'', r2(s.baseSalary), r2(s.advance), r2(s.deduction), r2(s.netPaid), s.status||'', s.paidDate||'']),
   ], [18, 10, 8, 12, 12, 13, 12, 9, 12]);
 
-  // 7. Current balances (as of export time)
+  // 7. Journal
+  const jnl = ((jnlData&&jnlData.items)||[]).slice().sort((a,b)=>a.date.localeCompare(b.date));
+  addSheet('Journal', [
+    ['Date', 'Debit (Dr)', 'Credit (Cr)', 'Amount (₹)', 'Narration', 'By'],
+    ...jnl.map(it=>[it.date, targetLabel(it.debit)||it.debitLabel||'', targetLabel(it.credit)||it.creditLabel||'', r2(it.amount), it.narration||'', it.by||'']),
+  ], [12, 28, 28, 12, 36, 14]);
+
+  // 8. Current balances (as of export time)
   addSheet('Balances', [
+    ['Ledgers', 'Group', 'Balance (₹, Dr +/Cr −)'],
+    ...state.ledgers.map(l=>[l.name, (LEDGER_GROUPS[l.group]||{}).label||l.group||'', r2(l.balance)]),
+    [],
     ['Creditors', 'Phone', 'Outstanding (₹)', 'Bowser stock (L)'],
     ...state.creditors.map(c=>[c.name, c.phone||'', r2(c.balance), c.isBowser?r2(c.bowserStockL):'']),
     [],
@@ -2185,6 +2209,268 @@ function drawTrendChart(el, byDay, monthId, dim){
   </svg>`;
 }
 
+/* ============================== LEDGERS & JOURNAL ============================== */
+// Double-entry journal. Every entry debits one "posting target" and credits another. Targets are:
+//   led:<id>   a user-created ledger (Setup → Ledgers). Its group decides the P&L effect:
+//              income / expense hit the monthly P&L; asset / liability / capital are balance-sheet only.
+//   cash       the built-in "Cash in hand" ledger (created on first use).
+//   acct:<id>  a bank account from Setup → Accounts (debit = money in, credit = money out).
+//   cred:<id>  a creditor (debit = they owe more, credit = they owe less — e.g. a discount allowed).
+// Ledger balances are stored debit-positive (a credit balance is negative) and shown as Dr / Cr.
+const LEDGER_GROUPS = {
+  income:    {label:'Income',               pl:'income',  normal:'cr', hint:'Discount received, commission, interest earned, other income'},
+  expense:   {label:'Expense',              pl:'expense', normal:'dr', hint:'Discount allowed, interest paid, bank charges, other running costs'},
+  asset:     {label:'Asset / Receivable',   pl:null,      normal:'dr', hint:'Advances given, deposits, amounts due to the station'},
+  liability: {label:'Liability / Payable',  pl:null,      normal:'cr', hint:'Dues payable to suppliers, loans, advances received'},
+  capital:   {label:'Capital / Drawings',   pl:null,      normal:'cr', hint:"Owner's capital introduced or withdrawn"},
+};
+function ledgerBalanceLabel(bal){
+  const n = num(bal);
+  if (!n) return money(0);
+  return money(Math.abs(n)) + (n>0 ? ' Dr' : ' Cr');
+}
+function postingTargets(){
+  const t = [{key:'cash', label:'Cash in hand', kind:'cash'}];
+  state.accounts.filter(a=>a.kind==='bank' && a.active!==false).forEach(a=>t.push({key:'acct:'+a.id, label:a.name+' (Bank)', kind:'acct', id:a.id}));
+  state.ledgers.filter(l=>l.active!==false && !l.cashInHand).forEach(l=>t.push({key:'led:'+l.id, label:l.name+' ('+(LEDGER_GROUPS[l.group]||{}).label+')', kind:'led', id:l.id, group:l.group}));
+  state.creditors.filter(c=>c.active!==false).forEach(c=>t.push({key:'cred:'+c.id, label:c.name+' (Creditor)', kind:'cred', id:c.id}));
+  return t;
+}
+function targetLabel(key){
+  const t = postingTargets().find(x=>x.key===key);
+  return t ? t.label : null;
+}
+async function ensureCashLedger(){
+  let cash = state.ledgers.find(l=>l.cashInHand);
+  if (cash) return cash;
+  const ref = await state.db.collection('ledgers').add({name:'Cash in hand', group:'asset', system:true, cashInHand:true, openingBalance:0, balance:0, active:true, createdAt:new Date().toISOString()});
+  cash = {id:ref.id, name:'Cash in hand', group:'asset', system:true, cashInHand:true, openingBalance:0, balance:0, active:true};
+  state.ledgers.push(cash);
+  return cash;
+}
+// Applies a debit of `dr` (negative = credit) to one target, updating the live balance it maps to.
+async function applyPosting(key, dr, meta){
+  if (!dr) return;
+  if (key==='cash'){
+    const cash = await ensureCashLedger();
+    await state.db.doc('ledgers/'+cash.id).update({balance: num(cash.balance) + dr});
+    cash.balance = num(cash.balance) + dr;
+    return;
+  }
+  const [kind, id] = key.split(':');
+  if (kind==='led'){
+    const l = state.ledgers.find(x=>x.id===id); if (!l) return;
+    await state.db.doc('ledgers/'+id).update({balance: num(l.balance) + dr});
+    l.balance = num(l.balance) + dr;
+  } else if (kind==='acct'){
+    const ref = state.db.doc('accounts/'+id);
+    const snap = await ref.get(); if (!snap.exists) return;
+    const data = snap.data();
+    const ledger = (data.ledger||[]).concat([{id:uid(), date:meta.date, type: dr>0?'deposit':'settlement', amount:Math.abs(dr), from:meta.narration||'Journal', note:'Journal: '+(meta.narration||''), journalId:meta.journalId, savedAt:new Date().toISOString()}]);
+    await ref.update({ledger, balance: num(data.balance) + dr});
+  } else if (kind==='cred'){
+    const c = state.creditors.find(x=>x.id===id); if (!c) return;
+    await state.db.doc('creditors/'+id).update({balance: num(c.balance) + dr});
+    c.balance = num(c.balance) + dr;
+  }
+}
+async function applyJournalItem(item, sign){
+  const amt = num(item.amount) * sign;
+  const meta = {date:item.date, narration:item.narration, journalId:item.id};
+  await applyPosting(item.debit, amt, meta);
+  await applyPosting(item.credit, -amt, meta);
+}
+// P&L effect of a month's journal: income = net credits to income ledgers, expense = net debits to expense ledgers.
+function journalPL(journalData){
+  let income=0, expense=0;
+  const groupOf = (key)=>{ if (!key || !key.startsWith('led:')) return null; const l = state.ledgers.find(x=>x.id===key.slice(4)); return l ? l.group : null; };
+  ((journalData&&journalData.items)||[]).forEach(it=>{
+    const a = num(it.amount);
+    const dg = groupOf(it.debit), cg = groupOf(it.credit);
+    if (dg==='income') income -= a; if (cg==='income') income += a;
+    if (dg==='expense') expense += a; if (cg==='expense') expense -= a;
+  });
+  return {income, expense};
+}
+
+function renderSetupLedgers(body){
+  const ledgers = state.ledgers.slice().sort((a,b)=>(a.group||'').localeCompare(b.group||'') || (a.name||'').localeCompare(b.name||''));
+  body.innerHTML = `
+    <div class="banner info">${icon('book')}<div>Ledgers are the accounts you post journal entries to. <strong>Income</strong> and <strong>Expense</strong> ledgers flow into the monthly P&amp;L; Asset, Liability and Capital ledgers only carry a balance. Bank accounts and creditors don't need a ledger here — they're already available in Journal Entry.</div></div>
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <div class="form-grid">
+        <div class="field"><label>Ledger name</label><input type="text" id="lgName" placeholder="e.g. Discount allowed"></div>
+        <div class="field"><label>Group</label><select id="lgGroup">${Object.entries(LEDGER_GROUPS).map(([k,g])=>`<option value="${k}">${esc(g.label)}</option>`).join('')}</select></div>
+        <div class="field"><label>Opening balance (₹)</label><input type="number" step="0.01" id="lgOpen" placeholder="0.00"></div>
+        <div class="field"><label>Opening side</label><select id="lgSide"><option value="dr">Debit (Dr)</option><option value="cr">Credit (Cr)</option></select></div>
+        <div class="field"><button class="btn primary" id="lgAdd" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add ledger</button></div>
+      </div>
+      <div class="hint" id="lgHint" style="color:var(--text-faint);font-size:12px;"></div>
+      <div id="lgMsg" style="font-size:13px;"></div>
+    </div>
+    <div class="card"><div class="table-wrap"><table>
+      <thead><tr><th>Name</th><th>Group</th><th>P&amp;L</th><th class="num">Balance</th><th>Status</th><th></th></tr></thead>
+      <tbody>${ledgers.length? ledgers.map(l=>{ const g = LEDGER_GROUPS[l.group]||{}; return `<tr>
+        <td>${esc(l.name)}${l.system?' <span class="hint" style="color:var(--text-faint);">(built-in)</span>':''}</td>
+        <td>${esc(g.label||l.group||'—')}</td>
+        <td>${g.pl? `<span class="pill ${g.pl==='income'?'good':'warning'}">${g.pl==='income'?'Income':'Expense'}</span>` : '<span class="pill neutral">Balance only</span>'}</td>
+        <td class="num">${ledgerBalanceLabel(l.balance)}</td>
+        <td><span class="pill ${l.active!==false?'good':'neutral'}">${l.active!==false?'Active':'Inactive'}</span></td>
+        <td><button class="btn ghost sm" data-edit="${l.id}">${icon('edit')}</button> ${l.system?'' : `<button class="btn ghost sm" data-toggle="${l.id}" data-cur="${l.active!==false}">${l.active!==false?'Deactivate':'Activate'}</button>${l.active===false?`<button class="btn danger sm" data-delete="${l.id}" style="margin-left:6px;">${icon('trash')}</button>`:''}`}</td>
+      </tr>`; }).join('') : `<tr><td colspan="6" class="empty">No ledgers yet.</td></tr>`}</tbody>
+    </table></div></div>
+  `;
+  const hint = ()=>{ $('#lgHint').textContent = (LEDGER_GROUPS[$('#lgGroup').value]||{}).hint||''; const g = LEDGER_GROUPS[$('#lgGroup').value]; if (g) $('#lgSide').value = g.normal; };
+  $('#lgGroup').onchange = hint; hint();
+  $$('[data-edit]', body).forEach(b=>b.onclick=()=>openSetupEditModal('ledgers', b.dataset.edit));
+  $('#lgAdd').onclick = async ()=>{
+    const name = $('#lgName').value.trim();
+    if (!name){ $('#lgMsg').innerHTML = `<span style="color:var(--critical)">Name the ledger.</span>`; return; }
+    if (state.ledgers.some(l=>String(l.name||'').toLowerCase()===name.toLowerCase())){ $('#lgMsg').innerHTML = `<span style="color:var(--critical)">A ledger with that name already exists.</span>`; return; }
+    const open = num($('#lgOpen').value) * ($('#lgSide').value==='cr' ? -1 : 1);
+    await state.db.collection('ledgers').add({name, group:$('#lgGroup').value, openingBalance:open, balance:open, active:true, createdAt:new Date().toISOString()});
+    await logActivity({entity:'Ledger', entityLabel:name, action:'add', summary: open?`Opening balance ${ledgerBalanceLabel(open)}`:''});
+    renderSetup($('#viewMount'));
+  };
+  $$('[data-toggle]', body).forEach(b=>b.onclick=async ()=>{
+    await state.db.doc('ledgers/'+b.dataset.toggle).update({active: b.dataset.cur!=='true'});
+  });
+  $$('[data-delete]', body).forEach(b=>b.onclick=async ()=>{
+    const ok = await confirmModal({title:'Delete this ledger?', body:'This permanently removes it from Setup. Past journal entries keep their saved name; their P&L effect for past months is lost.', confirmLabel:'Delete ledger'});
+    if (!ok) return;
+    const rec = state.ledgers.find(l=>l.id===b.dataset.delete);
+    await state.db.doc('ledgers/'+b.dataset.delete).delete();
+    await logActivity({entity:'Ledger', entityLabel:rec?rec.name:b.dataset.delete, action:'delete'});
+    renderSetup($('#viewMount'));
+  });
+}
+
+function renderJournal(mount){
+  const targets = postingTargets();
+  const opts = (sel)=> `<option value="">Select…</option>` + targets.map(t=>`<option value="${t.key}" ${t.key===sel?'selected':''}>${esc(t.label)}</option>`).join('');
+  mount.innerHTML = `
+    <h1 class="page-title">Journal Entry</h1>
+    <p class="page-sub">Record any transaction outside daily sales — discounts, advances, dues, receivables, payables, owner's capital. Debit the account that receives value, credit the account that gives it.</p>
+    ${state.ledgers.filter(l=>!l.cashInHand).length ? '' : `<div class="banner">${icon('book')}<div>No ledgers yet — create Income / Expense / Asset / Liability ledgers under <strong>Setup → Ledgers</strong> first. Bank accounts, creditors and Cash in hand are available already.</div></div>`}
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <div class="form-grid">
+        <div class="field"><label>Date</label><input type="date" id="jeDate" value="${todayStr()}" max="${todayStr()}"></div>
+        <div class="field" style="grid-column:span 2;"><label>Debit (Dr) — account receiving</label><select id="jeDebit">${opts('')}</select></div>
+        <div class="field" style="grid-column:span 2;"><label>Credit (Cr) — account giving</label><select id="jeCredit">${opts('')}</select></div>
+        <div class="field"><label>Amount (₹)</label><input type="number" step="0.01" id="jeAmt" placeholder="0.00"></div>
+        <div class="field" style="grid-column:span 3;"><label>Narration</label><input type="text" id="jeNarr" placeholder="e.g. Discount allowed to ABC Transports on Aug bill"></div>
+        <div class="field"><button class="btn primary" id="jeSave" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Post entry</button></div>
+      </div>
+      <div class="hint" style="color:var(--text-faint);font-size:12px;">Examples — Discount to a creditor: Dr <em>Discount allowed</em>, Cr <em>Creditor</em>. Advance to staff from till: Dr <em>Advance – Ravi</em>, Cr <em>Cash in hand</em>. Supplier bill payable: Dr <em>an Expense ledger</em>, Cr <em>Supplier payable</em>; when paid: Dr <em>Supplier payable</em>, Cr <em>Bank</em>. Interest credited by bank: Dr <em>Bank</em>, Cr <em>Interest income</em>.</div>
+      <div id="jeMsg" style="font-size:13px;margin-top:4px;"></div>
+    </div>
+    <div class="section-head"><h2>Entries</h2><span id="jeMonthLabel"></span></div>
+    <div id="jeList"></div>
+    <div class="section-head"><h2>Ledger balances</h2><span class="hint">live, all time</span></div>
+    <div class="card"><div class="table-wrap"><table>
+      <thead><tr><th>Ledger</th><th>Group</th><th class="num">Balance</th></tr></thead>
+      <tbody>${state.ledgers.length? state.ledgers.slice().sort((a,b)=>(a.name||'').localeCompare(b.name||'')).map(l=>`<tr><td>${esc(l.name)}</td><td>${esc((LEDGER_GROUPS[l.group]||{}).label||'')}</td><td class="num">${ledgerBalanceLabel(l.balance)}</td></tr>`).join('') : `<tr><td colspan="3" class="empty">No ledgers yet.</td></tr>`}</tbody>
+    </table></div></div>
+  `;
+  $('#jeSave').onclick = addJournalEntry;
+  loadJournalList();
+}
+
+async function addJournalEntry(){
+  const msg = $('#jeMsg');
+  const date = $('#jeDate').value, debit = $('#jeDebit').value, credit = $('#jeCredit').value;
+  const amount = num($('#jeAmt').value), narration = $('#jeNarr').value.trim();
+  if (!state.dbReady){ msg.innerHTML = `<span style="color:var(--critical)">Live data isn't connected.</span>`; return; }
+  if (!debit || !credit){ msg.innerHTML = `<span style="color:var(--critical)">Pick both a debit and a credit account.</span>`; return; }
+  if (debit===credit){ msg.innerHTML = `<span style="color:var(--critical)">Debit and credit can't be the same account.</span>`; return; }
+  if (!(amount>0)){ msg.innerHTML = `<span style="color:var(--critical)">Enter an amount.</span>`; return; }
+  $('#jeSave').disabled = true;
+  try{
+    const monthId = monthIdOf(date);
+    const item = {id:uid(), date, debit, debitLabel:targetLabel(debit)||debit, credit, creditLabel:targetLabel(credit)||credit, amount, narration, by: state.currentUser?state.currentUser.name:'', savedAt:new Date().toISOString()};
+    const data = (await getMonthDoc('journalMonthly', monthId)) || {items:[]};
+    data.items = (data.items||[]).concat([item]);
+    await setMonthDoc('journalMonthly', monthId, data);
+    await applyJournalItem(item, +1);
+    await logActivity({entity:'Journal', entityLabel:narration||`${item.debitLabel} / ${item.creditLabel}`, action:'add', summary:`Dr ${item.debitLabel} · Cr ${item.creditLabel} · ${money(amount)}`});
+    msg.innerHTML = `<span style="color:var(--good)">Entry posted.</span>`;
+    $('#jeAmt').value=''; $('#jeNarr').value='';
+    renderJournal($('#viewMount'));
+  }catch(e){ msg.innerHTML = `<span style="color:var(--critical)">Couldn't save: ${esc(e.message||'error')}</span>`; }
+  finally{ const b=$('#jeSave'); if (b) b.disabled=false; }
+}
+
+async function removeJournalEntry(monthId, item){
+  const ok = await confirmModal({title:'Delete this journal entry?', body:'This removes it and reverses its effect on both account balances.', confirmLabel:'Delete entry'});
+  if (!ok) return;
+  const data = await getMonthDoc('journalMonthly', monthId);
+  if (!data) return;
+  data.items = (data.items||[]).filter(i=>i.id!==item.id);
+  await setMonthDoc('journalMonthly', monthId, data);
+  await applyJournalItem(item, -1);
+  await logActivity({entity:'Journal', entityLabel:item.narration||`${item.debitLabel} / ${item.creditLabel}`, action:'delete', summary:`Removed ${money(item.amount)}`});
+  renderJournal($('#viewMount'));
+}
+
+function editJournalEntry(monthId, item){
+  const targets = postingTargets().map(t=>({value:t.key, label:t.label}));
+  const fields = [
+    {key:'date', label:'Date', type:'date'},
+    {key:'debit', label:'Debit (Dr)', type:'select', options:targets, fmt:v=>targetLabel(v)},
+    {key:'credit', label:'Credit (Cr)', type:'select', options:targets, fmt:v=>targetLabel(v)},
+    {key:'amount', label:'Amount (₹)', type:'number', fmt:v=>money(v)},
+    {key:'narration', label:'Narration', type:'text'},
+  ];
+  openLineEditModal({
+    title:'Edit journal entry', fields, values:item,
+    onSave: async (out)=>{
+      if (!state.dbReady) throw new Error("Live data isn't connected.");
+      if (!out.debit || !out.credit) throw new Error('Pick both accounts.');
+      if (out.debit===out.credit) throw new Error("Debit and credit can't be the same account.");
+      if (!(num(out.amount)>0)) throw new Error('Enter an amount.');
+      const changes = diffFields(fields, item, out);
+      const newItem = Object.assign({}, item, out, {debitLabel:targetLabel(out.debit)||item.debitLabel, creditLabel:targetLabel(out.credit)||item.creditLabel});
+      const newMonth = monthIdOf(out.date);
+      // Reverse the old posting, then apply the new one — handles a change of account, amount or month.
+      await applyJournalItem(item, -1);
+      const oldData = await getMonthDoc('journalMonthly', monthId);
+      if (oldData){ oldData.items = (oldData.items||[]).filter(i=>i.id!==item.id); await setMonthDoc('journalMonthly', monthId, oldData); }
+      const newData = (newMonth===monthId && oldData) ? oldData : ((await getMonthDoc('journalMonthly', newMonth)) || {items:[]});
+      newData.items = (newData.items||[]).concat([newItem]);
+      await setMonthDoc('journalMonthly', newMonth, newData);
+      await applyJournalItem(newItem, +1);
+      if (changes.length) await logActivity({entity:'Journal', entityLabel:newItem.narration||`${newItem.debitLabel} / ${newItem.creditLabel}`, action:'edit', changes});
+      renderJournal($('#viewMount'));
+    }
+  });
+}
+
+async function loadJournalList(){
+  const el = $('#jeList'); if(!el) return;
+  el.innerHTML = `<div class="card empty">Loading…</div>`;
+  const monthId = state.activeMonth;
+  $('#jeMonthLabel') && ($('#jeMonthLabel').innerHTML = monthSwitcherHtml());
+  const data = await getMonthDoc('journalMonthly', monthId);
+  const items = ((data&&data.items)||[]).slice().sort((a,b)=>b.date.localeCompare(a.date) || (b.savedAt||'').localeCompare(a.savedAt||''));
+  const pl = journalPL(data);
+  el.innerHTML = `<div class="card"><div class="table-wrap"><table>
+    <thead><tr><th>Date</th><th>Debit (Dr)</th><th>Credit (Cr)</th><th class="num">Amount</th><th>Narration</th><th>By</th><th></th></tr></thead>
+    <tbody>${items.length? items.map(it=>`<tr>
+      <td style="white-space:nowrap;">${fmtDateLabel(it.date)}</td>
+      <td>${esc(targetLabel(it.debit)||it.debitLabel)}</td>
+      <td>${esc(targetLabel(it.credit)||it.creditLabel)}</td>
+      <td class="num">${money(it.amount)}</td>
+      <td>${esc(it.narration||'—')}</td>
+      <td style="white-space:nowrap;">${esc(it.by||'—')}</td>
+      <td style="white-space:nowrap;"><button class="btn ghost sm" data-edit="${it.id}">${icon('edit')}</button> <button class="btn ghost sm" data-rm="${it.id}">${icon('trash')}</button></td>
+    </tr>`).join('') : `<tr><td colspan="7" class="empty">No journal entries for ${monthLabel(monthId)}.</td></tr>`}</tbody>
+    ${items.length?`<tfoot><tr><td colspan="7" style="font-size:12.5px;color:var(--text-muted);">P&amp;L effect this month: other income <strong class="mono">${money(pl.income)}</strong> · other expenses <strong class="mono">${money(pl.expense)}</strong></td></tr></tfoot>`:''}
+  </table></div></div>`;
+  $$('#jeList [data-edit]').forEach(b=>b.onclick=()=>{ const it = items.find(x=>x.id===b.dataset.edit); if (it) editJournalEntry(monthId, it); });
+  $$('#jeList [data-rm]').forEach(b=>b.onclick=()=>{ const it = items.find(x=>x.id===b.dataset.rm); if (it) removeJournalEntry(monthId, it); });
+  wireMonthSwitcher(()=>{ loadJournalList(); });
+}
+
 /* ============================== SETUP ============================== */
 // Field configs + collection/list lookups for the generic Setup "Edit" modal — one entry per
 // master-data type, shared by openSetupEditModal so each Setup subtab doesn't need its own edit form.
@@ -2226,6 +2512,11 @@ const SETUP_ENTITY = {
     {key:'phone', label:'Phone', type:'tel'},
     {key:'notes', label:'Notes', type:'text'},
   ]},
+  ledgers: { label:'Ledger', collection:'ledgers', list:()=>state.ledgers, fields:()=>[
+    {key:'name', label:'Ledger name', type:'text'},
+    {key:'group', label:'Group', type:'select', options:Object.entries(LEDGER_GROUPS).map(([k,g])=>({value:k,label:g.label})), fmt:v=>(LEDGER_GROUPS[v]||{}).label||v||'—'},
+    {key:'balance', label:'Balance (₹, Dr positive / Cr negative) — manual correction', type:'number', fmt:v=>ledgerBalanceLabel(v)},
+  ]},
   accounts: { label:'Account', collection:'accounts', list:()=>state.accounts, fields:()=>[
     {key:'name', label:'Account name', type:'text'},
     {key:'bankName', label:'Bank', type:'text'},
@@ -2258,7 +2549,7 @@ function renderSetup(mount){
     <h1 class="page-title">Setup</h1>
     <p class="page-sub">Master data for your station — tanks, nozzles, staff, shifts and today's rates.</p>
     <div class="subtabs" id="setupSubtabs">
-      ${['tanks','nozzles','staff','creditors','suppliers','accounts','users','rates','tools'].map(t=>`<button data-t="${t}" class="${state.setupTab===t?'active':''}">${t[0].toUpperCase()+t.slice(1)}</button>`).join('')}
+      ${['tanks','nozzles','staff','creditors','suppliers','accounts','ledgers','users','rates','tools'].map(t=>`<button data-t="${t}" class="${state.setupTab===t?'active':''}">${t[0].toUpperCase()+t.slice(1)}</button>`).join('')}
     </div>
     <div id="setupBody"></div>
   `;
@@ -2273,6 +2564,7 @@ function renderSetup(mount){
     case 'accounts': renderSetupAccounts(body); break;
     case 'users': renderSetupUsers(body); break;
     case 'rates': renderSetupRates(body); break;
+    case 'ledgers': renderSetupLedgers(body); break;
     case 'tools': renderSetupTools(body); break;
   }
 }
