@@ -2020,6 +2020,23 @@ async function loadReportBody(){
       <div class="card"><div class="chart-wrap"><h3 style="margin:0 0 10px;font-size:14px;">Daily revenue trend</h3><div id="chartTrend"></div></div></div>
     </div>
 
+    <div class="section-head"><h2>Cash &amp; bank balances</h2><span class="hint">live, as of now</span></div>
+    <div class="grid grid-kpi" style="margin-bottom:8px;">
+      ${(()=>{
+        const cash = state.ledgers.find(l=>l.cashInHand);
+        const banks = state.accounts.filter(a=>a.kind==='bank' && a.active!==false);
+        const receivables = state.accounts.filter(a=>a.kind==='receivable');
+        const bankTotal = banks.reduce((s,a)=>s+num(a.balance),0);
+        const cards = [];
+        cards.push(`<div class="card kpi"><div class="label">Cash in hand</div><div class="value ${cash&&num(cash.balance)<0?'critical':''}">${moneyShort(cash?num(cash.balance):0)}</div><div class="foot">${cash?'from journal postings':'no cash postings yet'}</div></div>`);
+        banks.forEach(a=>cards.push(`<div class="card kpi"><div class="label">${esc(a.name)}</div><div class="value ${num(a.balance)<0?'critical':''}">${moneyShort(a.balance)}</div><div class="foot">${esc(a.bankName||'bank account')}</div></div>`));
+        if (banks.length>1) cards.push(`<div class="card kpi"><div class="label">All banks</div><div class="value">${moneyShort(bankTotal)}</div><div class="foot">${banks.length} accounts</div></div>`);
+        receivables.forEach(a=>cards.push(`<div class="card kpi"><div class="label">${esc(a.name)}</div><div class="value">${moneyShort(a.balance)}</div><div class="foot">receivable</div></div>`));
+        if (!banks.length) cards.push(`<div class="card kpi"><div class="label">Bank</div><div class="value">—</div><div class="foot">add one in Setup → Accounts</div></div>`);
+        return cards.join('');
+      })()}
+    </div>
+
     <div class="section-head"><h2>Collections by payment method</h2></div>
     <div class="card"><div class="table-wrap"><table>
       <thead><tr><th>Method</th><th class="num">Amount</th></tr></thead>
