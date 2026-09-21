@@ -1424,6 +1424,12 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
     }
   }
 
+  // The duty's cash takings (after till expenses) go into the Cash in hand ledger — only the CHANGE
+  // since this duty's last save, so re-saving an edit never double-counts. Bank deposits of that
+  // cash are recorded via Journal (Dr Bank, Cr Cash in hand) or Receipts.
+  const cashDelta = cash - num(prevPay.cash);
+  if (cashDelta) await applyPosting('cash', cashDelta, {date, narration:`Duty cash — ${staffName}`, journalId:id});
+
   // HP Card sales are settled by HPCL later, not paid to the station same-day — auto-credit the
   // standing HPCL receivable account (created on first use) by the change in HP Card amount.
   const hpDelta = num(pay.hpCard) - num(prevPay.hpCard);
@@ -3359,6 +3365,12 @@ function renderSetupTools(body){
       <div id="toolMsg" style="font-size:13px;margin-top:8px;"></div>
     </div>
     <div class="card card-pad" style="margin-top:16px;">
+      <h3 style="margin-top:0;font-size:14px;">Recalculate Cash in hand</h3>
+      <p class="hint" style="color:var(--text-muted);font-size:13px;">Rebuilds the Cash in hand ledger from its opening balance + every duty's cash takings + receipts into cash + journal postings to cash. Run this once after upgrading (duties saved before cash tracking existed aren't in the balance yet), or whenever the figure looks off.</p>
+      <button class="btn" id="toolRecalcCash" ${state.dbReady?'':'disabled'}>Recalculate cash</button>
+      <div id="toolCashMsg" style="font-size:13px;margin-top:8px;"></div>
+    </div>
+    <div class="card card-pad" style="margin-top:16px;">
       <h3 style="margin-top:0;font-size:14px;">Station name</h3>
       <div class="row">
         <input type="text" id="cfgName" value="${esc(state.config.stationName||'')}" style="max-width:320px;">
@@ -3370,6 +3382,29 @@ function renderSetupTools(body){
     await state.db.doc('config/main').update({stationName:$('#cfgName').value.trim()}).catch(async ()=>{
       await state.db.doc('config/main').set(Object.assign({}, state.config, {stationName:$('#cfgName').value.trim()}));
     });
+  };
+  $('#toolRecalcCash').onclick = async ()=>{
+    const msg = $('#toolCashMsg');
+    msg.textContent = 'Recalculating…';
+    try{
+      const cashLedger = await ensureCashLedger();
+      const months = [];
+      let cursor = monthIdOf(todayStr());
+      for (let i=0;i<36;i++){ months.push(cursor); cursor = shiftMonth(cursor,-1); }
+      let dutyCash=0, receiptCash=0, journalCash=0;
+      const logsSnap = await state.db.collection('dailyLogs').limit(1000).get();
+      logsSnap.docs.forEach(d=>Object.values(d.data().duties||{}).forEach(x=>{ dutyCash += num(x.pay && x.pay.cash); }));
+      for (const m of months){
+        const r = await state.db.doc('receiptsMonthly/'+m).get();
+        if (r.exists) (r.data().items||[]).forEach(it=>{ if ((it.into||'cash')==='cash') receiptCash += num(it.amount); });
+        const j = await state.db.doc('journalMonthly/'+m).get();
+        if (j.exists) (j.data().items||[]).forEach(it=>{ if (it.debit==='cash') journalCash += num(it.amount); if (it.credit==='cash') journalCash -= num(it.amount); });
+      }
+      const balance = num(cashLedger.openingBalance) + dutyCash + receiptCash + journalCash;
+      await state.db.doc('ledgers/'+cashLedger.id).update({balance});
+      await logActivity({entity:'Ledger', entityLabel:'Cash in hand', action:'edit', changes:[{field:'Balance', from:ledgerBalanceLabel(cashLedger.balance), to:ledgerBalanceLabel(balance)}], summary:'Recalculated from history'});
+      msg.innerHTML = `<span style="color:var(--good)">Done — Cash in hand is now ${ledgerBalanceLabel(balance)} (opening ${money(cashLedger.openingBalance)} + duty cash ${money(dutyCash)} + receipts ${money(receiptCash)} ${journalCash<0?'−':'+'} journal ${money(Math.abs(journalCash))}).</span>`;
+    }catch(e){ msg.innerHTML = `<span style="color:var(--critical)">${esc(e.message||'Failed')}</span>`; }
   };
   $('#toolRecalc').onclick = async ()=>{
     const msg = $('#toolMsg');
