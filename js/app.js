@@ -877,7 +877,7 @@ async function loadDutyList(){
     <div class="card card-pad">
       <div class="row" style="justify-content:space-between;">
         <div class="stack"><strong>${esc(d.staffName)}</strong><span class="hint" style="font-size:12px;color:var(--text-muted)">${esc(d.startTime||'—')}–${esc(d.endTime||'—')} · ${(d.nozzleIds||[]).length} nozzle(s)</span></div>
-        <button class="btn ghost sm" data-edit="${id}">${icon('edit')}</button>
+        <span><button class="btn ghost sm" data-edit="${id}">${icon('edit')}</button> <button class="btn ghost sm" data-del="${id}" title="Delete duty">${icon('trash')}</button></span>
       </div>
       <div class="row" style="justify-content:space-between;margin-top:10px;">
         <span class="mono" style="font-weight:600;">${money(d.dutyAmount)}${d.oilAmount?` <span class="hint" style="font-weight:400;color:var(--text-faint);font-size:11.5px;">incl. ${money(d.oilAmount)} oils</span>`:''}</span>
@@ -885,6 +885,7 @@ async function loadDutyList(){
       </div>
     </div>`).join('')}</div>`;
   $$('[data-edit]', el).forEach(b=>b.onclick=()=>editDuty(dutyListDate, b.dataset.edit));
+  $$('[data-del]', el).forEach(b=>b.onclick=()=>deleteDuty(dutyListDate, b.dataset.del));
 }
 
 async function editDuty(date, dutyId){
@@ -911,7 +912,7 @@ function renderDutyForm(mount){
   mount.innerHTML = `
     <div class="row" style="justify-content:space-between;margin-bottom:10px;">
       <h1 class="page-title" style="margin-bottom:0;">${dutyForm.dutyId?'Edit duty':'New duty'} — ${fmtDateLabel(dutyForm.date)}</h1>
-      <button class="btn ghost sm" id="dutyBack">${icon('chevL')} Back to list</button>
+      <span>${dutyForm.dutyId?`<button class="btn danger sm" id="dutyDelete">${icon('trash')} Delete duty</button> `:''}<button class="btn ghost sm" id="dutyBack">${icon('chevL')} Back to list</button></span>
     </div>
 
     <div class="card card-pad" style="margin-bottom:16px;">
@@ -982,6 +983,7 @@ function renderDutyForm(mount){
   `;
 
   $('#dutyBack').onclick = ()=>{ dutyForm=null; renderCurrentView(); };
+  if ($('#dutyDelete')) $('#dutyDelete').onclick = ()=>deleteDuty(dutyForm.date, dutyForm.dutyId);
   $('#dfStaff').onchange = (e)=>{ dutyForm.staffId=e.target.value; };
   $('#dfStart').onchange = (e)=>{ dutyForm.startTime=e.target.value; };
   $('#dfEnd').onchange = (e)=>{ dutyForm.endTime=e.target.value; };
@@ -1456,6 +1458,70 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
 // Mirrors a duty's "expenses paid from till" lines into that month's expensesMonthly document,
 // tagged with source:'duty' + dutyId so re-saving the same duty replaces its own lines instead of
 // piling up duplicates. A manually-added expense (no dutyId) is never touched by this.
+// Removes a duty and reverses everything its save applied: tank stock (draw + transfers),
+// creditor balances / bowser stock, mirrored till expenses, bank settlement, HPCL receivable,
+// Cash in hand, and each nozzle's last closing reading (only when this duty was the latest one).
+async function deleteDuty(date, dutyId){
+  const data = await getDailyLog(date);
+  const d = data && data.duties && data.duties[dutyId];
+  if (!d) return;
+  const ok = await confirmModal({title:`Delete ${d.staffName}'s duty on ${fmtDateLabel(date)}?`, body:`This removes the duty (${money(d.dutyAmount)}) and reverses its effect on tank stock, creditor balances, bank / cash balances and the expenses list. Nozzle opening readings for the next duty will need checking.`, confirmLabel:'Delete duty'});
+  if (!ok) return;
+
+  // Tank stock: put back what left the source tanks, take back what transfers added.
+  const stockDeltas = {};
+  for (const [nid, n] of Object.entries(d.nozzles||{})){
+    const draw = n.drawLiters!=null ? n.drawLiters : n.liters;
+    if (n.tankId) stockDeltas[n.tankId] = (stockDeltas[n.tankId]||0) + num(draw);
+    if (n.transferToTankId && num(n.transferLiters)) stockDeltas[n.transferToTankId] = (stockDeltas[n.transferToTankId]||0) - num(n.transferLiters);
+  }
+  for (const [tankId, delta] of Object.entries(stockDeltas)){
+    if (!delta) continue;
+    const tank = state.tanks.find(t=>t.id===tankId);
+    const cur = tank ? num(tank.currentStockL) : 0;
+    await state.db.doc('tanks/'+tankId).update({currentStockL: cur + delta}).catch(()=>{});
+  }
+  // Nozzle last closing: if no later duty has moved it on, roll it back to this duty's opening.
+  for (const [nid, n] of Object.entries(d.nozzles||{})){
+    const nz = state.nozzles.find(x=>x.id===nid);
+    if (nz && Math.abs(num(nz.lastClosing) - num(n.closing)) < 0.005){
+      await state.db.doc('nozzles/'+nid).update({lastClosing: num(n.opening)}).catch(()=>{});
+    }
+  }
+  // Creditors: money owed and bowser liters.
+  const byCreditor = {};
+  (d.creditSales||[]).forEach(c=>{ if (!c.creditorId) return; const m = byCreditor[c.creditorId] = byCreditor[c.creditorId]||{amount:0, liters:0}; m.amount += num(c.amount); m.liters += num(c.liters); });
+  for (const [cid, m] of Object.entries(byCreditor)){
+    const creditor = state.creditors.find(c=>c.id===cid);
+    if (!creditor) continue;
+    const patch = {};
+    if (m.amount) patch.balance = num(creditor.balance) - m.amount;
+    if (m.liters && creditor.isBowser) patch.bowserStockL = num(creditor.bowserStockL) - m.liters;
+    if (Object.keys(patch).length) await state.db.doc('creditors/'+cid).update(patch).catch(()=>{});
+  }
+  await syncDutyExpenses(date, dutyId, []);
+  const pay = d.pay || {};
+  const bankAmt = num(pay.pos) + num(pay.upi);
+  if (pay.bankAccountId && bankAmt){
+    const acct = state.accounts.find(a=>a.id===pay.bankAccountId);
+    if (acct) await state.db.doc('accounts/'+acct.id).update({balance: num(acct.balance) - bankAmt}).catch(()=>{});
+  }
+  if (num(pay.hpCard)){
+    const hpAcct = state.accounts.find(a=>a.system && a.hpcl);
+    if (hpAcct) await state.db.doc('accounts/'+hpAcct.id).update({balance: num(hpAcct.balance) - num(pay.hpCard)}).catch(()=>{});
+  }
+  if (num(pay.cash)) await applyPosting('cash', -num(pay.cash), {date, narration:`Deleted duty — ${d.staffName}`, journalId:dutyId});
+
+  delete data.duties[dutyId];
+  let dayAmount=0, dayLiters=0;
+  Object.values(data.duties).forEach(x=>{ dayAmount+=x.dutyAmount||0; dayLiters+=x.dutyLiters||0; });
+  data.dayAmount = dayAmount; data.dayLiters = dayLiters; data.updatedAt = new Date().toISOString();
+  await setDailyLog(date, data);
+  await logActivity({entity:'Duty', entityLabel:`${d.staffName} · ${fmtDateLabel(date)}`, action:'delete', summary:`Deleted duty totalling ${money(d.dutyAmount)}`});
+  dutyForm = null;
+  renderCurrentView();
+}
+
 async function syncDutyExpenses(date, dutyId, expenseItems){
   const monthId = monthIdOf(date);
   const list = (expenseItems||[]).filter(e=>num(e.amount)>0);
