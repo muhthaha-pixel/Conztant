@@ -1,14 +1,13 @@
 // Firebase project settings for Conztant Fuel Ledger.
 //
-// Get these values from: Firebase console → Project settings → General →
-// "Your apps" → Web app → SDK setup and configuration → Config.
+// From: Firebase console → Project settings → General → Your apps → Web app → Config.
 // These are NOT secrets (they identify the project; access is controlled by
 // firestore.rules), so it is fine to commit this file.
 window.FIREBASE_CONFIG = {
-  apiKey: "PASTE_API_KEY",
-  authDomain: "PASTE_PROJECT_ID.firebaseapp.com",
-  projectId: "PASTE_PROJECT_ID",
-  storageBucket: "PASTE_PROJECT_ID.appspot.com",
-  messagingSenderId: "PASTE_SENDER_ID",
-  appId: "PASTE_APP_ID",
+  apiKey: "AIzaSyDnyOy9-p8eqq3NEf0dZzUmY-kd72cJ-D8",
+  authDomain: "conztant-fuel-ledger.firebaseapp.com",
+  projectId: "conztant-fuel-ledger",
+  storageBucket: "conztant-fuel-ledger.firebasestorage.app",
+  messagingSenderId: "827078684445",
+  appId: "1:827078684445:web:e7601dff933d5e45093bf4",
 };
