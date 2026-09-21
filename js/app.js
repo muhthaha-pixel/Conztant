@@ -831,7 +831,7 @@ let dutyForm = null;      // null = list view; object = add/edit form
 let dutyListDate = todayStr();
 
 function newDutyForm(date){
-  return { date, dutyId:null, staffId:'', startTime:'', endTime:'', nozzleIds:[], rows:{}, pos:0, upi:0, hpCard:0, bankAccountId:'', creditSales:[], expenses:[], cashCount:{}, _amount:0, _liters:0 };
+  return { date, dutyId:null, staffId:'', startTime:'', endTime:'', nozzleIds:[], rows:{}, pos:0, upi:0, hpCard:0, bankAccountId:'', creditSales:[], expenses:[], oils:[], cashCount:{}, _amount:0, _liters:0 };
 }
 
 function renderShiftEntry(mount){
@@ -866,7 +866,7 @@ async function loadDutyList(){
         <button class="btn ghost sm" data-edit="${id}">${icon('edit')}</button>
       </div>
       <div class="row" style="justify-content:space-between;margin-top:10px;">
-        <span class="mono" style="font-weight:600;">${money(d.dutyAmount)}</span>
+        <span class="mono" style="font-weight:600;">${money(d.dutyAmount)}${d.oilAmount?` <span class="hint" style="font-weight:400;color:var(--text-faint);font-size:11.5px;">incl. ${money(d.oilAmount)} oils</span>`:''}</span>
         <span class="hint" style="color:var(--text-muted);font-size:12.5px;">${liters(d.dutyLiters)}</span>
       </div>
     </div>`).join('')}</div>`;
@@ -886,7 +886,8 @@ async function editDuty(date, dutyId){
     bankAccountId:(d.pay&&d.pay.bankAccountId)||'',
     creditSales:(d.creditSales||[]).map(c=>Object.assign({},c)),
     expenses:(d.expenses||[]).map(e=>Object.assign({},e)),
-    cashCount: Object.assign({}, d.cashCount||{}), _amount:d.dutyAmount||0, _liters:d.dutyLiters||0,
+    oils:(d.oils||[]).map(o=>Object.assign({},o)),
+    cashCount: Object.assign({}, d.cashCount||{}), _amount:(d.fuelAmount!=null?d.fuelAmount:d.dutyAmount)||0, _liters:d.dutyLiters||0,
   };
   renderCurrentView();
 }
@@ -919,8 +920,15 @@ function renderDutyForm(mount){
     <div id="dfRows"></div>
 
     <div class="card card-pad" style="margin-top:16px;">
+      <div class="section-head" style="margin:0 0 8px;"><h2 style="font-size:13.5px;">Oil / lubricant sales</h2><button class="btn ghost sm" id="dfAddOil">${icon('plus')} Add oil sale</button></div>
+      <div id="dfOilRows"></div>
+    </div>
+
+    <div class="card card-pad" style="margin-top:16px;">
       <h3 style="margin:0 0 12px;font-size:14px;">Closing — payment split</h3>
       <div class="form-grid">
+        <div class="field"><label>Fuel sales (₹)</label><input type="text" id="dfFuelTotal" value="₹0" disabled></div>
+        <div class="field"><label>Oil sales (₹)</label><input type="text" id="dfOilTotal" value="₹0" disabled></div>
         <div class="field"><label>POS / Card (₹)</label><input type="number" step="0.01" id="dfPos" value="${dutyForm.pos||0}"></div>
         <div class="field"><label>UPI (₹)</label><input type="number" step="0.01" id="dfUpi" value="${dutyForm.upi||0}"></div>
         <div class="field"><label>HP Card (₹)</label><input type="number" step="0.01" id="dfHp" value="${dutyForm.hpCard||0}"></div>
@@ -952,7 +960,7 @@ function renderDutyForm(mount){
     </div>
 
     <div class="card card-pad row" style="justify-content:space-between;margin-top:16px;">
-      <div class="stack"><span class="hint">Duty total</span><span class="mono" style="font-size:19px;font-weight:600" id="dfTotalAmt">₹0</span></div>
+      <div class="stack"><span class="hint">Duty total (fuel + oils)</span><span class="mono" style="font-size:19px;font-weight:600" id="dfTotalAmt">₹0</span></div>
       <div class="stack" style="align-items:flex-end;"><span class="hint">Sale liters</span><span class="mono" id="dfTotalLtr">0 L</span></div>
       <button class="btn primary" id="dfSave" ${state.dbReady?'':'disabled'}>${icon('pump')} Save duty</button>
     </div>
@@ -973,12 +981,41 @@ function renderDutyForm(mount){
   updateNozzleHint();
   $('#dfAddCredit').onclick = ()=>{ dutyForm.creditSales.push({id:uid(), creditorId:'', creditorName:'', amount:0, liters:0, indentNo:'', vehicleNo:''}); renderCreditRows(); };
   $('#dfAddExpense').onclick = ()=>{ dutyForm.expenses.push({id:uid(), category:EXPENSE_CATEGORIES[0], description:'', amount:0}); renderDutyExpenseRows(); };
+  $('#dfAddOil').onclick = ()=>{ dutyForm.oils.push({id:uid(), name:'', amount:0}); renderOilRows(); };
   $('#dfSave').onclick = saveDutyEntry;
 
   renderDutyRows();
   renderCreditRows();
   renderDutyExpenseRows();
+  renderOilRows();
   renderDenomGrid();
+}
+
+// Oil / lubricant sales are sold over the counter by the same staff member, so they're part of the
+// duty total the cash reconciliation has to account for — but they're not fuel, so they stay out of
+// liters, tank stock and the per-product fuel figures.
+function renderOilRows(){
+  const el = $('#dfOilRows'); if(!el) return;
+  dutyForm.oils = dutyForm.oils || [];
+  if (!dutyForm.oils.length){ el.innerHTML = `<div class="hint" style="color:var(--text-faint);font-size:12.5px;">No oil sales added.</div>`; recomputeDutyTotals(); return; }
+  el.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Oil / product name</th><th class="num">Amount (₹)</th><th></th></tr></thead><tbody id="dfOilTbody"></tbody></table></div>`;
+  const tbody = $('#dfOilTbody');
+  dutyForm.oils.forEach(o=>{
+    const tr = document.createElement('tr'); tr.dataset.id = o.id;
+    tr.innerHTML = `<td><input type="text" class="oName" value="${esc(o.name||'')}" placeholder="e.g. Servo 4T 1L" style="width:200px;"></td>
+      <td class="num"><input type="number" step="0.01" class="oAmt" value="${o.amount||0}" style="width:100px;text-align:right;"></td>
+      <td><button class="btn ghost sm oRemove">${icon('trash')}</button></td>`;
+    tbody.appendChild(tr);
+    const sync = ()=>{
+      o.name = tr.querySelector('.oName').value;
+      o.amount = num(tr.querySelector('.oAmt').value);
+      recomputeDutyTotals();
+    };
+    tr.querySelector('.oName').addEventListener('input', sync);
+    tr.querySelector('.oAmt').addEventListener('input', sync);
+    tr.querySelector('.oRemove').onclick = ()=>{ dutyForm.oils = dutyForm.oils.filter(x=>x.id!==o.id); renderOilRows(); };
+  });
+  recomputeDutyTotals();
 }
 
 function onNozzleCheck(cb){
@@ -1089,7 +1126,10 @@ function recomputeDutyTotals(){
   let amt=0, ltr=0;
   Object.values(dutyForm.rows).forEach(r=>{ if(r.closing!=null){ amt+=r.amount||0; ltr+=r.liters||0; } });
   dutyForm._amount=amt; dutyForm._liters=ltr;
-  $('#dfTotalAmt') && ($('#dfTotalAmt').textContent = money(amt));
+  const oilAmt = (dutyForm.oils||[]).reduce((s,o)=>s+num(o.amount),0);
+  $('#dfTotalAmt') && ($('#dfTotalAmt').textContent = money(amt + oilAmt));
+  $('#dfFuelTotal') && ($('#dfFuelTotal').value = money(amt));
+  $('#dfOilTotal') && ($('#dfOilTotal').value = money(oilAmt));
   $('#dfTotalLtr') && ($('#dfTotalLtr').textContent = liters(ltr));
   recomputePayments();
 }
@@ -1177,7 +1217,8 @@ function recomputePayments(){
   if (bankEl) dutyForm.bankAccountId = bankEl.value;
   const credit = dutyForm.creditSales.reduce((s,c)=>s+num(c.amount),0);
   const expenses = dutyForm.expenses.reduce((s,e)=>s+num(e.amount),0);
-  const total = dutyForm._amount||0;
+  const oils = (dutyForm.oils||[]).reduce((s,o)=>s+num(o.amount),0);
+  const total = (dutyForm._amount||0) + oils;
   const cash = total - pos - upi - hp - credit - expenses;
   $('#dfCreditTotal') && ($('#dfCreditTotal').value = money(credit));
   $('#dfExpenseTotal') && ($('#dfExpenseTotal').value = money(expenses));
@@ -1232,6 +1273,7 @@ async function saveDutyEntry(){
       pay:{pos:dutyForm.pos||0, upi:dutyForm.upi||0, hpCard:dutyForm.hpCard||0, bankAccountId:dutyForm.bankAccountId||''},
       creditSales: dutyForm.creditSales.filter(c=>num(c.amount)>0 || num(c.liters)>0),
       expenses: dutyForm.expenses.filter(e=>num(e.amount)>0),
+      oils: (dutyForm.oils||[]).filter(o=>num(o.amount)>0 || (o.name||'').trim()),
       cashCount: dutyForm.cashCount,
     });
     dutyForm = null;
@@ -1242,7 +1284,7 @@ async function saveDutyEntry(){
   }
 }
 
-async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTime, nozzleIds, entries, pay, creditSales, expenses, cashCount}){
+async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTime, nozzleIds, entries, pay, creditSales, expenses, oils, cashCount}){
   const data = (await getDailyLog(date)) || {duties:{}};
   data.duties = data.duties || {};
   const id = dutyId || uid();
@@ -1264,11 +1306,16 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
   }
   const credit = creditSales.reduce((s,c)=>s+num(c.amount),0);
   const expenseTotal = (expenses||[]).reduce((s,e)=>s+num(e.amount),0);
+  // dutyAmount is the staff member's full takings (fuel + oils) — what the cash split must reconcile
+  // to. fuelAmount is kept separately so reports can still show fuel-only figures.
+  const fuelAmount = dutyAmount;
+  const oilAmount = (oils||[]).reduce((s,o)=>s+num(o.amount),0);
+  dutyAmount = fuelAmount + oilAmount;
   const cash = dutyAmount - (pay.pos||0) - (pay.upi||0) - (pay.hpCard||0) - credit - expenseTotal;
   data.duties[id] = {
-    staffId, staffName, startTime, endTime, nozzleIds, nozzles: entries, dutyAmount, dutyLiters,
+    staffId, staffName, startTime, endTime, nozzleIds, nozzles: entries, dutyAmount, fuelAmount, oilAmount, dutyLiters,
     pay: {pos:pay.pos||0, upi:pay.upi||0, hpCard:pay.hpCard||0, bankAccountId:pay.bankAccountId||'', credit, expenses:expenseTotal, cash},
-    creditSales, expenses: expenses||[], cashCount, savedAt: new Date().toISOString(),
+    creditSales, expenses: expenses||[], oils: oils||[], cashCount, savedAt: new Date().toISOString(),
   };
   data.date = date;
   let dayAmount=0, dayLiters=0;
@@ -1917,7 +1964,7 @@ async function loadReportBody(){
   const salData = await getMonthDoc('salaryMonthly', monthId);
   const stockData = await getMonthDoc('stockReceiptsMonthly', monthId);
 
-  let revenue=0, ltrTotal=0;
+  let revenue=0, oilRevenue=0, ltrTotal=0;
   const byProduct = {p1:{liters:0,amount:0}, p2:{liters:0,amount:0}, p3:{liters:0,amount:0}};
   const byDay = {};
   const payTotals = {pos:0, upi:0, hpCard:0, credit:0, cash:0};
@@ -1925,6 +1972,7 @@ async function loadReportBody(){
     revenue += doc.dayAmount||0; ltrTotal += doc.dayLiters||0;
     byDay[doc.date] = (byDay[doc.date]||0) + (doc.dayAmount||0);
     Object.values(doc.duties||{}).forEach(duty=>{
+      oilRevenue += duty.oilAmount||0;
       const p = duty.pay||{};
       payTotals.pos += p.pos||0; payTotals.upi += p.upi||0; payTotals.hpCard += p.hpCard||0; payTotals.credit += p.credit||0; payTotals.cash += p.cash||0;
       Object.values(duty.nozzles||{}).forEach(nz=>{
@@ -1934,6 +1982,8 @@ async function loadReportBody(){
     });
   });
   const fuelCost = (stockData && stockData.totalAmount) || 0;
+  const fuelRevenue = revenue - oilRevenue;
+  // Oil purchase cost isn't tracked, so oil sales are treated as margin in full for now.
   const grossMargin = revenue - fuelCost;
   const expenses = (expData && expData.total) || 0;
   const salary = (salData && salData.totalAccrued) || 0;
@@ -1941,7 +1991,8 @@ async function loadReportBody(){
 
   body.innerHTML = `
     <div class="grid grid-kpi" style="margin-bottom:22px;">
-      <div class="card kpi"><div class="label">Fuel sales</div><div class="value">${moneyShort(revenue)}</div><div class="foot">${liters(ltrTotal)}</div></div>
+      <div class="card kpi"><div class="label">Fuel sales</div><div class="value">${moneyShort(fuelRevenue)}</div><div class="foot">${liters(ltrTotal)}</div></div>
+      <div class="card kpi"><div class="label">Oil sales</div><div class="value">${moneyShort(oilRevenue)}</div><div class="foot">total takings ${moneyShort(revenue)}</div></div>
       <div class="card kpi"><div class="label">Fuel purchase cost</div><div class="value">${moneyShort(fuelCost)}</div><div class="foot">from deliveries logged</div></div>
       <div class="card kpi"><div class="label">Gross margin</div><div class="value ${grossMargin>=0?'good':'critical'}">${moneyShort(grossMargin)}</div></div>
       <div class="card kpi"><div class="label">Expenses</div><div class="value">${moneyShort(expenses)}</div></div>
@@ -2255,6 +2306,7 @@ function renderSetupCreditors(body){
         <div class="field"><label>Phone</label><input type="tel" id="crPhone" placeholder="Optional"></div>
         <div class="field"><label>Default vehicle no.</label><input type="text" id="crVeh" placeholder="Optional"></div>
         <div class="field"><label>Credit limit (₹, optional)</label><input type="number" id="crLimit" placeholder="0"></div>
+        <div class="field"><label>Opening balance (₹ already owed)</label><input type="number" step="0.01" id="crOpening" placeholder="0.00"></div>
       </div>
       <label class="toggle" style="margin-top:2px;"><input type="checkbox" id="crBowser"> This creditor is a Bowser (mobile delivery tank filled from a station nozzle)</label>
       <div class="form-grid" id="crBowserFields" style="margin-top:10px;display:none;">
@@ -2294,14 +2346,15 @@ function renderSetupCreditors(body){
     const name = $('#crName').value.trim();
     if (!name){ $('#crMsg').innerHTML = `<span style="color:var(--critical)">Enter a name.</span>`; return; }
     const isBowser = $('#crBowser').checked;
+    const openingBalance = num($('#crOpening').value);
     await state.db.collection('creditors').add({
       name, phone:$('#crPhone').value.trim(), vehicleNo:$('#crVeh').value.trim(),
       creditLimit:num($('#crLimit').value),
       isBowser, bowserProduct: isBowser?$('#crBowserProduct').value:null, bowserCapacityL: isBowser?num($('#crBowserCap').value):0,
-      bowserStockL:0, balance:0, payments:[],
+      bowserStockL:0, openingBalance, balance:openingBalance, payments:[],
       active:true, createdAt:new Date().toISOString(),
     });
-    await logActivity({entity:'Creditor', entityLabel:name, action:'add'});
+    await logActivity({entity:'Creditor', entityLabel:name, action:'add', summary: openingBalance?`Opening balance ${money(openingBalance)}`:''});
     renderSetup($('#viewMount'));
   };
   $$('[data-toggle]', body).forEach(b=>b.onclick=async ()=>{
