@@ -20,11 +20,11 @@ firestore.rules          database access rules (paste into Firebase console)
 3. **Firestore → Rules** tab → replace the contents with [`firestore.rules`](firestore.rules) → **Publish**.
 4. **Build → Authentication → Get started → Sign-in method → Anonymous → Enable → Save.**
 5. **Project settings (gear icon) → General → Your apps → `</>` (Web)** → nickname `web` → Register → copy the `firebaseConfig` values into [`js/firebase-config.js`](js/firebase-config.js).
-6. Later, after step 2 below gives you a site URL: **Authentication → Settings → Authorized domains → Add domain** → `YOUR-USERNAME.github.io`.
+6. Later, after step 2 below gives you a site URL: **Authentication → Settings → Authorized domains → Add domain** → `muhthaha-pixel.github.io`.
 
 ## 2. Put it on GitHub and publish
 
-1. Create an empty repository on GitHub (e.g. `conztant-fuel-ledger`, public or private — GitHub Pages works with both on a Pro plan; public on Free).
+1. Create an empty repository on GitHub (this project uses `muhthaha-pixel/Conztant`; public or private — GitHub Pages works with both on a Pro plan; public on Free).
 2. From this folder:
 
    ```bash
@@ -32,13 +32,13 @@ firestore.rules          database access rules (paste into Firebase console)
    git add .
    git commit -m "Conztant Fuel Ledger — initial version"
    git branch -M main
-   git remote add origin https://github.com/YOUR-USERNAME/conztant-fuel-ledger.git
+   git remote add origin https://github.com/muhthaha-pixel/Conztant.git
    git push -u origin main
    ```
 
 3. In the repo: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
 4. The **Deploy to GitHub Pages** workflow runs automatically (see the **Actions** tab). When it's green, the app is live at
-   `https://YOUR-USERNAME.github.io/conztant-fuel-ledger/`.
+   `https://muhthaha-pixel.github.io/Conztant/`.
 5. Add that domain to Firebase Authorized domains (step 1.6 above).
 
 Every later `git push` to `main` redeploys within about a minute.
