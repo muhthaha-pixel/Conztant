@@ -758,13 +758,25 @@ function renderCurrentView(){
     root.innerHTML = viewShell();
   }
   const mount = $('#viewMount');
+  // A render error used to leave the page blank with nothing but a console message — show it
+  // instead, so a problem is reportable rather than mysterious, and the rest of the app stays usable.
+  try{
+    renderView(mount);
+  }catch(e){
+    mount.innerHTML = `<div class="card card-pad" style="max-width:560px;margin:32px auto;">
+      <h2 style="margin-top:0;font-size:16px;">This page couldn't be displayed</h2>
+      <p style="font-size:13.5px;color:var(--text-muted);">Something went wrong while drawing it. Your saved data is untouched — switch to another tab and try again, or send this message on:</p>
+      <p class="mono" style="font-size:12.5px;background:var(--surface-2);padding:10px;border-radius:8px;">${esc(state.view)}: ${esc(e.message||String(e))}</p>
+    </div>`;
+  }
+}
+
+function renderView(mount){
   switch(state.view){
     case 'dashboard': renderDashboard(mount); break;
     case 'shift': renderShiftEntry(mount); break;
-
     case 'purchase': renderPurchase(mount); break;
     case 'expenses': renderExpenses(mount); break;
-
     case 'reports': renderReports(mount); break;
     case 'receipts': renderReceipts(mount); break;
     case 'journal': renderJournal(mount); break;
@@ -1834,6 +1846,7 @@ async function loadStockReceiptsList(){
 }
 
 /* ============================== PAYMENTS / EXPENSES ============================== */
+const EXPENSE_CATEGORIES = ['Electricity','Maintenance & Repairs','Rent','Statutory / Tax','Bank & Card Charges','Transport','Miscellaneous'];
 // Payments / Expenses share one monthly document (expensesMonthly). An item is either
 //   kind:'expense'  — a running cost by category; counts in the P&L expenses line
 //   kind:'payment'  — money paid to a party (supplier, lender, staff advance, owner…), optionally
