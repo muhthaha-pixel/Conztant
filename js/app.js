@@ -1847,6 +1847,7 @@ async function loadStockReceiptsList(){
 
 /* ============================== PAYMENTS / EXPENSES ============================== */
 const EXPENSE_CATEGORIES = ['Electricity','Maintenance & Repairs','Rent','Statutory / Tax','Bank & Card Charges','Transport','Miscellaneous'];
+const PAYMENT_ITEMS = ['Supplier payment','Staff advance','Staff salary','Loan / EMI repayment','Owner drawings','Statutory / Tax','Bank charges','Deposit / security','Asset purchase','Other payment'];
 // Payments / Expenses share one monthly document (expensesMonthly). An item is either
 //   kind:'expense'  — a running cost by category; counts in the P&L expenses line
 //   kind:'payment'  — money paid to a party (supplier, lender, staff advance, owner…), optionally
@@ -1858,7 +1859,7 @@ function paidFromLabel(k){ return !k ? 'Not tracked' : k==='cash' ? 'Cash in han
 async function applyExpenseItem(item, sign){
   const amt = num(item.amount) * sign;
   if (!amt) return;
-  const who = expenseKind(item)==='payment' ? (item.party||'payment') : (item.category||'expense');
+  const who = expenseKind(item)==='payment' ? [item.item, item.party].filter(Boolean).join(' — ')||'payment' : (item.category||'expense');
   const meta = {date:item.date, narration:`${expenseKind(item)==='payment'?'Payment to':'Expense —'} ${who}${item.description?' — '+item.description:''}`, journalId:item.id};
   if (item.paidFrom) await applyPosting(item.paidFrom, -amt, meta);            // money out
   if (expenseKind(item)==='payment' && item.ledger) await applyPosting(item.ledger, amt, meta); // settles / records on the ledger
@@ -1876,6 +1877,7 @@ function renderExpenses(mount){
         <div class="field" id="exCatWrap"><label>Category</label><select id="exCat">${EXPENSE_CATEGORIES.map(c=>`<option>${c}</option>`).join('')}</select></div>
         <div class="field" id="exPartyWrap" style="display:none;"><label>Paid to (party)</label><input type="text" id="exParty" list="exPartyList" placeholder="e.g. HPCL / Ravi (advance) / Bank loan">
           <datalist id="exPartyList">${state.suppliers.filter(s=>s.active!==false).map(s=>`<option value="${esc(s.name)}">`).join('')}${state.staff.filter(s=>s.active!==false).map(s=>`<option value="${esc(s.name)}">`).join('')}</datalist></div>
+        <div class="field" id="exItemWrap" style="display:none;"><label>Payment for</label><select id="exItem">${PAYMENT_ITEMS.map(p=>`<option>${p}</option>`).join('')}</select></div>
         <div class="field" id="exLedgerWrap" style="display:none;"><label>Settle / debit to</label><select id="exLedger">${payLedgerOptions('')}</select></div>
         <div class="field" style="grid-column:span 2;"><label>Description</label><input type="text" id="exDesc" placeholder="e.g. July electricity bill / Invoice DO-4521"></div>
         <div class="field"><label>Amount (₹)</label><input type="number" step="0.01" id="exAmt" placeholder="0.00"></div>
@@ -1895,6 +1897,7 @@ function renderExpenses(mount){
     $('#exCatWrap').style.display = pay ? 'none' : '';
     $('#exPartyWrap').style.display = pay ? '' : 'none';
     $('#exLedgerWrap').style.display = pay ? '' : 'none';
+    $('#exItemWrap').style.display = pay ? '' : 'none';
     $('#exSaveLbl').textContent = pay ? 'Add payment' : 'Add expense';
     $('#exMode').value = pay ? 'Bank transfer' : 'Cash';
     $('#exFrom').value = pay ? ($('#exFrom').querySelector('option[value^="acct:"]') ? $('#exFrom').querySelector('option[value^="acct:"]').value : 'cash') : 'cash';
@@ -1911,6 +1914,7 @@ async function addExpense(){
     id:uid(), date:$('#exDate').value, kind,
     category: kind==='expense' ? $('#exCat').value : '',
     party: kind==='payment' ? $('#exParty').value.trim() : '',
+    item: kind==='payment' ? $('#exItem').value : '',
     ledger: kind==='payment' ? $('#exLedger').value : '',
     description:$('#exDesc').value.trim(), amount:num($('#exAmt').value),
     mode:$('#exMode').value, paidFrom:$('#exFrom').value,
@@ -1955,7 +1959,7 @@ function expenseEditFields(item){
   return [
     {key:'date', label:'Date', type:'date'},
     ...(expenseKind(item)==='payment'
-      ? [{key:'party', label:'Paid to (party)', type:'text'}, {key:'ledger', label:'Settle / debit to', type:'select', options:payLedgerList(), fmt:v=>targetLabel(v)||'—'}]
+      ? [{key:'party', label:'Paid to (party)', type:'text'}, {key:'item', label:'Payment for', type:'select', options:PAYMENT_ITEMS.map(p=>({value:p,label:p}))}, {key:'ledger', label:'Settle / debit to', type:'select', options:payLedgerList(), fmt:v=>targetLabel(v)||'—'}]
       : [{key:'category', label:'Category', type:'select', options:EXPENSE_CATEGORIES.map(c=>({value:c,label:c}))}]),
     {key:'description', label:'Description', type:'text'},
     {key:'amount', label:'Amount (₹)', type:'number', fmt:v=>money(v)},
@@ -2002,7 +2006,7 @@ async function loadExpensesList(){
     <tbody>${items.length? items.map(it=>`<tr>
       <td style="white-space:nowrap;">${fmtDateLabel(it.date)}</td>
       <td><span class="pill ${expenseKind(it)==='payment'?'neutral':'warning'}">${expenseKind(it)==='payment'?'Payment':'Expense'}</span></td>
-      <td>${esc(expenseKind(it)==='payment' ? (it.party||'—') : (it.category||'—'))}${it.ledger?`<div class="hint" style="font-size:11px;color:var(--text-faint)">→ ${esc(targetLabel(it.ledger)||'')}</div>`:''}</td>
+      <td>${esc(expenseKind(it)==='payment' ? (it.party||'—') : (it.category||'—'))}${it.item?`<div class="hint" style="font-size:11px;color:var(--text-faint)">${esc(it.item)}</div>`:''}${it.ledger?`<div class="hint" style="font-size:11px;color:var(--text-faint)">→ ${esc(targetLabel(it.ledger)||'')}</div>`:''}</td>
       <td>${esc(it.description||'—')}${it.source==='duty'?`<div class="hint" style="font-size:11px;color:var(--text-faint)">from a duty entry (paid from till)</div>`:''}</td>
       <td>${esc(it.mode||(it.source==='duty'?'Cash':'—'))}</td>
       <td>${esc(it.source==='duty' ? 'Duty till' : paidFromLabel(it.paidFrom))}</td>
@@ -2422,7 +2426,7 @@ function buildLedgerPostings(r){
     else add(it.payFrom, it.date, who, 0, it.amount, it.ref||'');
   });
   r.expenses.concat(r.payments).forEach(it=>{
-    const who = expenseKind(it)==='payment' ? `Payment — ${it.party||''}` : `Expense — ${it.category||''}`;
+    const who = expenseKind(it)==='payment' ? `Payment — ${[it.party, it.item].filter(Boolean).join(' · ')}` : `Expense — ${it.category||''}`;
     const label = who + (it.description?' · '+it.description:'');
     if (it.paidFrom) add(it.paidFrom, it.date, label, 0, it.amount);
     if (expenseKind(it)==='payment' && it.ledger) add(it.ledger, it.date, label, it.amount, 0);
@@ -2704,8 +2708,14 @@ function renderReportBody(body, cfg, r, c){
   }
   if (has('payments')){
     const rows = r.payments.slice().sort(sortD);
-    parts.push(table('Payments', [{label:'Date'},{label:'Paid to'},{label:'Description'},{label:'Mode'},{label:'Paid from'},{label:'Ledger'},{label:'Amount',num:true}],
-      rows.map(it=>[fmtDateLabel(it.date), esc(it.party||'—'), esc(it.description||'—'), esc(it.mode||'—'), esc(paidFromLabel(it.paidFrom)), esc(targetLabel(it.ledger)||'—'), money(it.amount)]), ['Total','','','','','', money(rows.reduce((s,i)=>s+num(i.amount),0))]));
+    parts.push(table('Payments', [{label:'Date'},{label:'Paid to'},{label:'Payment for'},{label:'Description'},{label:'Mode'},{label:'Paid from'},{label:'Ledger'},{label:'Amount',num:true}],
+      rows.map(it=>[fmtDateLabel(it.date), esc(it.party||'—'), esc(it.item||'—'), esc(it.description||'—'), esc(it.mode||'—'), esc(paidFromLabel(it.paidFrom)), esc(targetLabel(it.ledger)||'—'), money(it.amount)]), ['Total','','','','','','', money(rows.reduce((s,i)=>s+num(i.amount),0))]));
+    // Totals per payment head, so recurring outflows are visible at a glance.
+    const byItem = {};
+    rows.forEach(it=>{ const k = it.item||'—'; byItem[k] = (byItem[k]||0) + num(it.amount); });
+    parts.push(table('Payments by head', [{label:'Payment for'},{label:'Count',num:true},{label:'Amount',num:true}],
+      Object.entries(byItem).sort((a,b)=>b[1]-a[1]).map(([k,v])=>[esc(k), rows.filter(x=>(x.item||'—')===k).length, money(v)]),
+      ['Total', rows.length, money(rows.reduce((s,i)=>s+num(i.amount),0))]));
   }
   if (has('salary')){
     const rows = r.salaryRows.slice().sort((a,b)=>b.month.localeCompare(a.month) || (a.name||'').localeCompare(b.name||''));
@@ -2857,7 +2867,7 @@ function exportReportExcel(rep){
   if (has('oils')) addSheet('Oil sales', [['Date', 'Staff', 'Oil / product', 'Amount (₹)'], ...r.oils.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(o=>[o.date, o.staffName, o.name||'', r2(o.amount)])], [12, 18, 26, 12]);
   if (has('purchases')) addSheet('Purchases', [['Date', 'Product', 'Tank', 'Supplier', 'Invoice / DO', 'Liters', 'Rate', 'Amount (₹)'], ...r.purchases.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, state.config.products[it.product]||it.product||'', it.tankName||'', it.supplier||'', it.ref||'', r2(it.liters), r2(it.rate), r2(it.amount)])], [12, 14, 12, 16, 14, 10, 9, 12]);
   if (has('expenses')) addSheet('Expenses', [['Date', 'Category', 'Description', 'Source', 'Amount (₹)'], ...r.expenses.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, it.category||'', it.description||'', it.source==='duty'?'Duty till':'Manual', r2(it.amount)])], [12, 22, 30, 10, 12]);
-  if (has('payments')) addSheet('Payments', [['Date', 'Paid to', 'Description', 'Mode', 'Paid from', 'Ledger', 'Amount (₹)'], ...r.payments.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, it.party||'', it.description||'', it.mode||'', paidFromLabel(it.paidFrom), targetLabel(it.ledger)||'', r2(it.amount)])], [12, 22, 30, 12, 16, 22, 12]);
+  if (has('payments')) addSheet('Payments', [['Date', 'Paid to', 'Payment for', 'Description', 'Mode', 'Paid from', 'Ledger', 'Amount (₹)'], ...r.payments.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, it.party||'', it.item||'', it.description||'', it.mode||'', paidFromLabel(it.paidFrom), targetLabel(it.ledger)||'', r2(it.amount)])], [12, 22, 20, 30, 12, 16, 22, 12]);
   if (has('salary')) addSheet('Salary', [['Month', 'Staff', 'Wage type', 'Hours', 'Base (₹)', 'Advance (₹)', 'Deduction (₹)', 'Net (₹)', 'Status', 'Paid date'], ...r.salaryRows.map(s=>[s.month, s.name, s.wageType||'monthly', s.hoursWorked!=null?r2(s.hoursWorked):'', r2(s.baseSalary), r2(s.advance), r2(s.deduction), r2(s.netPaid), s.status||'', s.paidDate||''])], [10, 18, 10, 8, 12, 12, 13, 12, 9, 12]);
   if (has('journal')) addSheet('Journal', [['Date', 'Debit (Dr)', 'Credit (Cr)', 'Amount (₹)', 'Narration', 'By'], ...r.journal.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, targetLabel(it.debit)||it.debitLabel||'', targetLabel(it.credit)||it.creditLabel||'', r2(it.amount), it.narration||'', it.by||''])], [12, 28, 28, 12, 36, 14]);
   if (has('receipts')) addSheet('Receipts', [['Date', 'From', 'Type', 'Amount (₹)', 'Into', 'Mode', 'Reference', 'Narration', 'Ledger', 'By'], ...r.receipts.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, receiptFromLabel(it), it.type==='creditor'?'Creditor':'Other', r2(it.amount), it.into==='cash'?'Cash in hand':((state.accounts.find(a=>'acct:'+a.id===it.into)||{}).name||''), it.mode||'', it.reference||'', it.narration||'', targetLabel(it.ledger)||'', it.by||''])], [12, 24, 10, 12, 18, 12, 14, 30, 22, 14]);
