@@ -57,6 +57,7 @@ function icon(name){
     trash:'<path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0-.8 12.2a2 2 0 0 1-2 1.8H9.8a2 2 0 0 1-2-1.8L7 7"/>',
     edit:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
     clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
+    truck:'<path d="M3 7h11v9H3z"/><path d="M14 10h4l3 3v3h-7z"/><circle cx="7" cy="18" r="1.6"/><circle cx="17" cy="18" r="1.6"/>',
     inbox:'<path d="M12 3v10"/><path d="M8 9l4 4 4-4"/><path d="M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/>',
     book:'<path d="M4 4h6a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H4Z"/><path d="M20 4h-6a3 3 0 0 0-3 3v13a2 2 0 0 1 2-2h7Z"/>',
   };
@@ -468,8 +469,8 @@ function loadTodayLog(){
 // no server-side rule layer behind the db capability, so this is a front-door convenience for a
 // shared terminal, not a hard security boundary. See the login screen's own note to the owner.
 const ROLE_TABS = {
-  owner:   ['dashboard','shift','stock','expenses','salary','reports','receipts','journal','activity','setup'],
-  manager: ['dashboard','shift','stock','expenses','salary','reports','receipts','journal'],
+  owner:   ['dashboard','shift','stock','purchase','expenses','salary','reports','receipts','journal','activity','setup'],
+  manager: ['dashboard','shift','stock','purchase','expenses','salary','reports','receipts','journal'],
   staff:   ['dashboard','shift'],
 };
 const ROLE_LABEL = {owner:'Owner', manager:'Manager', staff:'Staff'};
@@ -708,6 +709,7 @@ const NAV = [
   {id:'dashboard', label:'Dashboard', icon:'home'},
   {id:'shift', label:'Duty Entry', icon:'pump'},
   {id:'stock', label:'Stock', icon:'tank'},
+  {id:'purchase', label:'Purchase', icon:'truck'},
   {id:'expenses', label:'Payments / Expenses', icon:'receipt'},
   {id:'salary', label:'Salary', icon:'wallet'},
   {id:'reports', label:'Reports', icon:'chart'},
@@ -762,6 +764,7 @@ function renderCurrentView(){
     case 'dashboard': renderDashboard(mount); break;
     case 'shift': renderShiftEntry(mount); break;
     case 'stock': renderStock(mount); break;
+    case 'purchase': renderPurchase(mount); break;
     case 'expenses': renderExpenses(mount); break;
     case 'salary': renderSalary(mount); break;
     case 'reports': renderReports(mount); break;
@@ -807,7 +810,7 @@ function renderDashboard(mount){
   renderTankCards($('#dashTanks'), {compact:true});
   $('#qaShift').onclick = ()=>{ state.view='shift'; renderAll(); };
   $('#qaExpense').onclick = ()=>{ state.view='expenses'; renderAll(); };
-  $('#qaStock').onclick = ()=>{ state.view='stock'; renderAll(); };
+  $('#qaStock').onclick = ()=>{ state.view='purchase'; renderAll(); };
 }
 
 function tankLevelStatus(pct){
@@ -1539,40 +1542,21 @@ async function syncDutyExpenses(date, dutyId, expenseItems){
 function renderStock(mount){
   mount.innerHTML = `
     <h1 class="page-title">Tank Stock</h1>
-    <p class="page-sub">Live stock per tank, updated automatically as duties are saved and fuel is purchased.</p>
+    <p class="page-sub">Live stock per tank, updated automatically as duties are saved and fuel is purchased. Purchase entry has moved to the <strong>Purchase</strong> tab; the stock report is under <strong>Reports</strong>.</p>
     <div class="grid grid-2" id="stockTanks" style="margin-bottom:24px;"></div>
 
     <div class="section-head"><h2>Bowsers (mobile tanks)</h2><span class="hint">filled from station nozzles, tracked as credit</span></div>
     <div class="grid grid-2" id="stockBowsers" style="margin-bottom:24px;"></div>
 
-    <div class="section-head"><h2>Fuel purchases</h2><span id="stockMonthLabel"></span></div>
-    <div class="card card-pad" style="margin-bottom:16px;">
-      <div class="form-grid">
-        <div class="field"><label>Date</label><input type="date" id="drDate" value="${todayStr()}" max="${todayStr()}"></div>
-        <div class="field"><label>Product</label><select id="drProduct">${PRODUCT_KEYS.map(k=>`<option value="${k}">${esc(state.config.products[k]||k)}</option>`).join('')}</select></div>
-        <div class="field"><label>Tank</label><select id="drTank"></select></div>
-        <div class="field"><label>Quantity (L)</label><input type="number" step="0.01" id="drLiters" placeholder="0.00"></div>
-        <div class="field"><label>Rate (₹/L)</label><input type="number" step="0.01" id="drRate" placeholder="0.00"></div>
-        <div class="field"><label>Total amount</label><input type="text" id="drTotal" value="₹0" disabled></div>
-        <div class="field"><label>Supplier</label><input type="text" id="drSupplier" list="drSupplierList" placeholder="e.g. HPCL">
-          <datalist id="drSupplierList">${state.suppliers.filter(s=>s.active!==false).map(s=>`<option value="${esc(s.name)}">`).join('')}</datalist>
-        </div>
-        <div class="field"><label>Invoice / DO ref</label><input type="text" id="drRef" placeholder="e.g. DO-4521"></div>
-        <div class="field"><button class="btn primary" id="drSave" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add purchase</button></div>
-      </div>
-      <div id="drMsg" style="font-size:13px;margin-top:4px;"></div>
+    <div class="row">
+      <button class="btn primary" id="stkToPurchase">${icon('truck')} Record a fuel purchase</button>
+      <button class="btn" id="stkToReport">${icon('chart')} Stock report</button>
     </div>
-
-    <div id="stockList"></div>
   `;
   renderTankCards($('#stockTanks'), {});
   renderBowserCards($('#stockBowsers'));
-  populateDrTankOptions();
-  $('#drProduct').onchange = populateDrTankOptions;
-  $('#drLiters').oninput = updateDrTotal;
-  $('#drRate').oninput = updateDrTotal;
-  $('#drSave').onclick = addStockReceipt;
-  loadStockReceiptsList();
+  $('#stkToPurchase').onclick = ()=>{ state.view='purchase'; renderAll(); };
+  $('#stkToReport').onclick = ()=>{ const cfg = loadReportCfg(); cfg.report = 'stock'; saveReportCfg(); state.view='reports'; renderAll(); };
 }
 
 function renderBowserCards(el){
@@ -1598,6 +1582,125 @@ function renderBowserCards(el){
   }).join('');
 }
 
+async function adjustTankStock(tankId, delta){
+  if (!tankId || !delta) return;
+  const tank = state.tanks.find(t=>t.id===tankId);
+  const cur = tank ? num(tank.currentStockL) : 0;
+  await state.db.doc('tanks/'+tankId).update({currentStockL: cur + delta});
+}
+
+/* ============================== PURCHASE ============================== */
+// Fuel purchases (stockReceiptsMonthly). A purchase adds liters to its tank and, when bought on
+// credit, adds the amount to that supplier's outstanding balance; paying cash/bank instead reduces
+// that balance straight away. Supplier dues are settled later from Payments / Expenses.
+function purchasePayOptions(sel){
+  return `<option value="credit" ${sel==='credit'?'selected':''}>On credit (supplier due)</option>`
+    + `<option value="cash" ${sel==='cash'?'selected':''}>Paid — Cash in hand</option>`
+    + state.accounts.filter(a=>a.kind==='bank' && a.active!==false).map(a=>`<option value="acct:${a.id}" ${('acct:'+a.id)===sel?'selected':''}>Paid — ${esc(a.name)}</option>`).join('');
+}
+function purchasePayLabel(k){ return !k || k==='credit' ? 'On credit' : (k==='cash' ? 'Cash in hand' : ((state.accounts.find(a=>'acct:'+a.id===k)||{}).name || k)); }
+function supplierName(id, fallback){ const s = state.suppliers.find(x=>x.id===id); return s ? s.name : (fallback||'—'); }
+// sign +1 applies a purchase's money + stock effects, -1 reverses them.
+async function applyPurchase(item, sign){
+  const amt = num(item.amount) * sign;
+  const ltr = num(item.liters) * sign;
+  if (ltr) await adjustTankStock(item.tankId, ltr);
+  if (!amt) return;
+  const meta = {date:item.date, narration:`Fuel purchase — ${supplierName(item.supplierId, item.supplier)}${item.ref?' ('+item.ref+')':''}`, journalId:item.id};
+  const payFrom = item.payFrom || 'credit';
+  if (payFrom==='credit'){
+    if (item.supplierId) await applyPosting('sup:'+item.supplierId, -amt, meta);  // we owe more
+  } else {
+    await applyPosting(payFrom, -amt, meta);                                       // money out
+  }
+}
+
+function renderPurchase(mount){
+  mount.innerHTML = `
+    <h1 class="page-title">Purchase</h1>
+    <p class="page-sub">Fuel bought from your suppliers — the tank is topped up and, on credit, the supplier's outstanding balance goes up. Settle dues from Payments / Expenses.</p>
+    ${state.suppliers.filter(s=>s.active!==false).length ? '' : `<div class="banner">${icon('truck')}<div>No suppliers yet — add them below, with the balance you already owe them as the opening balance.</div></div>`}
+
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <div class="form-grid">
+        <div class="field"><label>Date</label><input type="date" id="drDate" value="${todayStr()}" max="${todayStr()}"></div>
+        <div class="field"><label>Supplier</label><select id="drSupplier"><option value="">Select supplier…</option>${state.suppliers.filter(s=>s.active!==false).map(s=>`<option value="${s.id}">${esc(s.name)} — ${money(s.balance||0)} due</option>`).join('')}</select></div>
+        <div class="field"><label>Product</label><select id="drProduct">${PRODUCT_KEYS.map(k=>`<option value="${k}">${esc(state.config.products[k]||k)}</option>`).join('')}</select></div>
+        <div class="field"><label>Tank</label><select id="drTank"></select></div>
+        <div class="field"><label>Quantity (L)</label><input type="number" step="0.01" id="drLiters" placeholder="0.00"></div>
+        <div class="field"><label>Rate (₹/L)</label><input type="number" step="0.01" id="drRate" placeholder="0.00"></div>
+        <div class="field"><label>Total amount</label><input type="text" id="drTotal" value="₹0" disabled></div>
+        <div class="field"><label>Payment</label><select id="drPay">${purchasePayOptions('credit')}</select></div>
+        <div class="field"><label>Invoice / DO ref</label><input type="text" id="drRef" placeholder="e.g. DO-4521"></div>
+        <div class="field"><button class="btn primary" id="drSave" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add purchase</button></div>
+      </div>
+      <div id="drMsg" style="font-size:13px;margin-top:4px;"></div>
+    </div>
+
+    <div class="section-head"><h2>Purchases</h2><span id="stockMonthLabel"></span></div>
+    <div id="stockList"></div>
+
+    <div class="section-head"><h2>Suppliers</h2><span class="hint">outstanding balances, live</span></div>
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <div class="form-grid">
+        <div class="field"><label>Supplier name</label><input type="text" id="spName" placeholder="e.g. HPCL"></div>
+        <div class="field"><label>Phone</label><input type="tel" id="spPhone" placeholder="Optional"></div>
+        <div class="field"><label>Opening balance (₹ already owed)</label><input type="number" step="0.01" id="spOpening" placeholder="0.00"></div>
+        <div class="field" style="grid-column:span 2;"><label>Notes</label><input type="text" id="spNotes" placeholder="Optional"></div>
+        <div class="field"><button class="btn primary" id="spAdd" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add supplier</button></div>
+      </div>
+      <div id="spMsg" style="font-size:13px;"></div>
+    </div>
+    <div class="card"><div class="table-wrap"><table>
+      <thead><tr><th>Supplier</th><th>Phone</th><th class="num">Opening</th><th class="num">Outstanding</th><th>Status</th><th></th></tr></thead>
+      <tbody>${state.suppliers.length? state.suppliers.map(s=>`<tr>
+        <td>${esc(s.name)}${s.notes?`<div class="hint" style="font-size:11px;color:var(--text-faint)">${esc(s.notes)}</div>`:''}</td>
+        <td>${esc(s.phone||'—')}</td>
+        <td class="num">${money(s.openingBalance||0)}</td>
+        <td class="num" ${num(s.balance)>0?'style="color:var(--critical);font-weight:600;"':''}>${money(s.balance||0)}</td>
+        <td><span class="pill ${s.active!==false?'good':'neutral'}">${s.active!==false?'Active':'Inactive'}</span></td>
+        <td style="white-space:nowrap;"><button class="btn sm" data-pay="${s.id}">Pay</button> <button class="btn ghost sm" data-edit="${s.id}">${icon('edit')}</button> <button class="btn ghost sm" data-toggle="${s.id}" data-cur="${s.active!==false}">${s.active!==false?'Deactivate':'Activate'}</button></td>
+      </tr>`).join('') : `<tr><td colspan="6" class="empty">No suppliers yet.</td></tr>`}</tbody>
+      ${state.suppliers.length?`<tfoot><tr><td colspan="3" style="font-weight:700;">Total owed</td><td class="num" style="font-weight:700;">${money(state.suppliers.reduce((s,x)=>s+num(x.balance),0))}</td><td colspan="2"></td></tr></tfoot>`:''}
+    </table></div></div>
+  `;
+  populateDrTankOptions();
+  $('#drProduct').onchange = populateDrTankOptions;
+  $('#drLiters').oninput = updateDrTotal;
+  $('#drRate').oninput = updateDrTotal;
+  $('#drSave').onclick = addStockReceipt;
+  $('#spAdd').onclick = addSupplierFromPurchase;
+  $$('#viewMount [data-edit]').forEach(b=>b.onclick=()=>openSetupEditModal('suppliers', b.dataset.edit));
+  $$('#viewMount [data-toggle]').forEach(b=>b.onclick=async ()=>{ await state.db.doc('suppliers/'+b.dataset.toggle).update({active: b.dataset.cur!=='true'}); });
+  $$('#viewMount [data-pay]').forEach(b=>b.onclick=()=>{
+    const s = state.suppliers.find(x=>x.id===b.dataset.pay);
+    if (!s) return;
+    state.view = 'expenses'; renderAll();
+    // Pre-fill the payment form for this supplier.
+    const k = $('#exKind'); if (!k) return;
+    k.value = 'payment'; k.onchange();
+    if ($('#exParty')) $('#exParty').value = s.name;
+    if ($('#exLedger')) $('#exLedger').value = 'sup:'+s.id;
+    if ($('#exAmt')) $('#exAmt').focus();
+  });
+  loadStockReceiptsList();
+}
+
+async function addSupplierFromPurchase(){
+  const msg = $('#spMsg');
+  const name = $('#spName').value.trim();
+  if (!state.dbReady){ msg.innerHTML = `<span style="color:var(--critical)">Live data isn't connected.</span>`; return; }
+  if (!name){ msg.innerHTML = `<span style="color:var(--critical)">Enter a name.</span>`; return; }
+  if (state.suppliers.some(s=>String(s.name||'').toLowerCase()===name.toLowerCase())){ msg.innerHTML = `<span style="color:var(--critical)">A supplier with that name already exists.</span>`; return; }
+  const opening = num($('#spOpening').value);
+  await state.db.collection('suppliers').add({
+    name, phone:$('#spPhone').value.trim(), notes:$('#spNotes').value.trim(),
+    openingBalance:opening, balance:opening, active:true, createdAt:new Date().toISOString(),
+  });
+  await logActivity({entity:'Supplier', entityLabel:name, action:'add', summary: opening?`Opening balance ${money(opening)}`:''});
+  renderPurchase($('#viewMount'));
+}
+
 function populateDrTankOptions(){
   const sel = $('#drTank'); if (!sel) return;
   const productKey = $('#drProduct') ? $('#drProduct').value : PRODUCT_KEYS[0];
@@ -1616,82 +1719,78 @@ async function addStockReceipt(){
   const msg = $('#drMsg');
   const date = $('#drDate').value, productKey = $('#drProduct').value, tankId = $('#drTank').value;
   const ltr = num($('#drLiters').value), rate = num($('#drRate').value);
-  const amount = ltr*rate;
-  const supplier = $('#drSupplier').value.trim(), ref = $('#drRef').value.trim();
+  const supplierId = $('#drSupplier').value, payFrom = $('#drPay').value, ref = $('#drRef').value.trim();
   if (!state.dbReady){ msg.innerHTML = `<span style="color:var(--critical)">Live data isn't connected.</span>`; return; }
   if (!tankId){ msg.innerHTML = `<span style="color:var(--critical)">No tank is set up for this product yet — add one in Setup → Tanks.</span>`; return; }
+  if (!supplierId){ msg.innerHTML = `<span style="color:var(--critical)">Select the supplier.</span>`; return; }
   if (!(ltr>0)){ msg.innerHTML = `<span style="color:var(--critical)">Enter the quantity received.</span>`; return; }
   $('#drSave').disabled = true;
   try{
     const tank = state.tanks.find(t=>t.id===tankId);
     const monthId = monthIdOf(date);
+    const item = {id:uid(), date, product:productKey, tankId, tankName: tank?tank.name:'', liters:ltr, rate, amount:ltr*rate,
+      supplierId, supplier:supplierName(supplierId), payFrom, ref, by: state.currentUser?state.currentUser.name:''};
     const data = (await getMonthDoc('stockReceiptsMonthly', monthId)) || {items:[], totalLiters:0, totalAmount:0};
-    data.items = (data.items||[]).concat([{id:uid(), date, product:productKey, tankId, tankName: tank?tank.name:'', liters:ltr, rate, amount, supplier, ref}]);
-    data.totalLiters = (data.totalLiters||0) + ltr;
-    data.totalAmount = (data.totalAmount||0) + amount;
+    data.items = (data.items||[]).concat([item]);
+    data.totalLiters = data.items.reduce((s,i)=>s+num(i.liters),0);
+    data.totalAmount = data.items.reduce((s,i)=>s+num(i.amount),0);
     await setMonthDoc('stockReceiptsMonthly', monthId, data);
-
-    const cur = tank ? num(tank.currentStockL) : 0;
-    await state.db.doc('tanks/'+tankId).update({currentStockL: cur + ltr});
-    await logActivity({entity:'Purchase', entityLabel:(tank?tank.name:'')+' · '+fmtDateLabel(date), action:'add', summary:`Added ${liters(ltr)} for ${money(amount)}`});
-
-    $('#drMsg').innerHTML = `<span style="color:var(--good)">Purchase recorded — ${esc(tank?tank.name:'tank')} stock updated.</span>`;
-    $('#drLiters').value=''; $('#drRate').value=''; $('#drSupplier').value=''; $('#drRef').value='';
+    await applyPurchase(item, +1);
+    await logActivity({entity:'Purchase', entityLabel:item.supplier+' · '+fmtDateLabel(date), action:'add', summary:`Added ${liters(ltr)} for ${money(item.amount)} (${purchasePayLabel(payFrom)})`});
+    msg.innerHTML = `<span style="color:var(--good)">Purchase recorded — ${esc(tank?tank.name:'tank')} stock updated${payFrom==='credit'?' and supplier balance increased':''}.</span>`;
+    $('#drLiters').value=''; $('#drRate').value=''; $('#drRef').value='';
     updateDrTotal();
-    loadStockReceiptsList();
+    renderPurchase($('#viewMount'));
   }catch(e){
     msg.innerHTML = `<span style="color:var(--critical)">Couldn't save: ${esc(e.message||'error')}</span>`;
-  } finally { $('#drSave').disabled = false; }
+  } finally { const b=$('#drSave'); if (b) b.disabled = false; }
 }
 
-async function adjustTankStock(tankId, delta){
-  if (!tankId || !delta) return;
-  const tank = state.tanks.find(t=>t.id===tankId);
-  const cur = tank ? num(tank.currentStockL) : 0;
-  await state.db.doc('tanks/'+tankId).update({currentStockL: cur + delta});
+function stockReceiptEditFields(){
+  return [
+    {key:'date', label:'Date', type:'date'},
+    {key:'supplierId', label:'Supplier', type:'select', options:state.suppliers.map(s=>({value:s.id,label:s.name})), fmt:v=>supplierName(v)},
+    {key:'product', label:'Product', type:'select', options:PRODUCT_KEYS.map(k=>({value:k,label:state.config.products[k]||k})), fmt:v=>state.config.products[v]||v||'—'},
+    {key:'tankId', label:'Tank', type:'select', options:state.tanks.filter(t=>t.active!==false).map(t=>({value:t.id,label:t.name})), fmt:v=>{ const t=state.tanks.find(x=>x.id===v); return t?t.name:(v||'—'); }},
+    {key:'liters', label:'Quantity (L)', type:'number', fmt:v=>liters(v)},
+    {key:'rate', label:'Rate (₹/L)', type:'number', fmt:v=>money(v)},
+    {key:'payFrom', label:'Payment', type:'select', options:[{value:'credit',label:'On credit (supplier due)'},{value:'cash',label:'Paid — Cash in hand'}].concat(state.accounts.filter(a=>a.kind==='bank').map(a=>({value:'acct:'+a.id,label:'Paid — '+a.name}))), fmt:v=>purchasePayLabel(v)},
+    {key:'ref', label:'Invoice / DO ref', type:'text'},
+  ];
 }
-
-const STOCK_RECEIPT_EDIT_FIELDS = [
-  {key:'date', label:'Date', type:'date'},
-  {key:'product', label:'Product', type:'select', options:PRODUCT_KEYS.map(k=>({value:k,label:state.config.products[k]||k})), fmt:v=>state.config.products[v]||v||'—'},
-  {key:'tankId', label:'Tank', type:'select', options:state.tanks.filter(t=>t.active!==false).map(t=>({value:t.id,label:t.name})), fmt:v=>{ const t=state.tanks.find(x=>x.id===v); return t?t.name:(v||'—'); }},
-  {key:'liters', label:'Quantity (L)', type:'number', fmt:v=>liters(v)},
-  {key:'rate', label:'Rate (₹/L)', type:'number', fmt:v=>money(v)},
-  {key:'supplier', label:'Supplier', type:'text'},
-  {key:'ref', label:'Invoice / DO ref', type:'text'},
-];
 function editStockReceipt(monthId, item){
+  const fields = stockReceiptEditFields();
   openLineEditModal({
-    title:'Edit purchase', fields:STOCK_RECEIPT_EDIT_FIELDS, values:item,
+    title:'Edit purchase', fields, values:Object.assign({payFrom:'credit'}, item),
     onSave: async (out)=>{
       if (!state.dbReady) throw new Error("Live data isn't connected.");
-      out.amount = num(out.liters)*num(out.rate);
-      const tank = state.tanks.find(t=>t.id===out.tankId);
-      out.tankName = tank?tank.name:'';
-      const changes = diffFields(STOCK_RECEIPT_EDIT_FIELDS, item, out);
-      const data = await getMonthDoc('stockReceiptsMonthly', monthId);
-      if (!data) throw new Error('Record not found.');
-      const idx = (data.items||[]).findIndex(i=>i.id===item.id);
-      if (idx<0) throw new Error('Record not found.');
-      data.items = data.items.map((i,ix)=> ix===idx ? Object.assign({}, i, out, {id:item.id}) : i);
-      data.totalLiters = data.items.reduce((s,i)=>s+num(i.liters),0);
-      data.totalAmount = data.items.reduce((s,i)=>s+num(i.amount),0);
-      await setMonthDoc('stockReceiptsMonthly', monthId, data);
-      // Move the tank-stock effect the same way an edited duty transfer does: same tank just applies
-      // the liters delta, a changed tank reverses the old one and credits the new one.
-      if ((item.tankId||'')===(out.tankId||'')){
-        await adjustTankStock(out.tankId, num(out.liters)-num(item.liters));
-      } else {
-        await adjustTankStock(item.tankId, -num(item.liters));
-        await adjustTankStock(out.tankId, num(out.liters));
+      if (!(num(out.liters)>0)) throw new Error('Enter the quantity.');
+      const changes = diffFields(fields, item, out);
+      const newItem = Object.assign({}, item, out, {id:item.id, amount:num(out.liters)*num(out.rate), supplier:supplierName(out.supplierId), tankName:(state.tanks.find(t=>t.id===out.tankId)||{}).name||''});
+      const newMonth = monthIdOf(out.date);
+      // Reverse the old purchase in full, then apply the new one — covers a changed tank, supplier,
+      // payment source, quantity or month in one path.
+      await applyPurchase(item, -1);
+      const oldData = await getMonthDoc('stockReceiptsMonthly', monthId);
+      if (oldData){
+        oldData.items = (oldData.items||[]).filter(i=>i.id!==item.id);
+        oldData.totalLiters = oldData.items.reduce((s,i)=>s+num(i.liters),0);
+        oldData.totalAmount = oldData.items.reduce((s,i)=>s+num(i.amount),0);
+        await setMonthDoc('stockReceiptsMonthly', monthId, oldData);
       }
-      if (changes.length) await logActivity({entity:'Purchase', entityLabel:(tank?tank.name:'')+' · '+fmtDateLabel(out.date), action:'edit', changes});
-      loadStockReceiptsList();
+      const newData = (newMonth===monthId && oldData) ? oldData : ((await getMonthDoc('stockReceiptsMonthly', newMonth)) || {items:[], totalLiters:0, totalAmount:0});
+      newData.items = (newData.items||[]).concat([newItem]);
+      newData.totalLiters = newData.items.reduce((s,i)=>s+num(i.liters),0);
+      newData.totalAmount = newData.items.reduce((s,i)=>s+num(i.amount),0);
+      await setMonthDoc('stockReceiptsMonthly', newMonth, newData);
+      await applyPurchase(newItem, +1);
+      if (changes.length) await logActivity({entity:'Purchase', entityLabel:newItem.supplier+' · '+fmtDateLabel(newItem.date), action:'edit', changes});
+      renderPurchase($('#viewMount'));
     }
   });
 }
 async function removeStockReceipt(monthId, item){
-  const ok = await confirmModal({title:'Delete this purchase?', body:'This removes it from the purchase log and reverses the liters it added to the tank.', confirmLabel:'Delete purchase'});
+  const ok = await confirmModal({title:'Delete this purchase?', body:'This removes it, takes the liters back out of the tank and reverses the supplier or cash / bank effect.', confirmLabel:'Delete purchase'});
   if (!ok) return;
   const data = await getMonthDoc('stockReceiptsMonthly', monthId);
   if (!data) return;
@@ -1699,9 +1798,9 @@ async function removeStockReceipt(monthId, item){
   data.totalLiters = data.items.reduce((s,i)=>s+num(i.liters),0);
   data.totalAmount = data.items.reduce((s,i)=>s+num(i.amount),0);
   await setMonthDoc('stockReceiptsMonthly', monthId, data);
-  await adjustTankStock(item.tankId, -num(item.liters));
-  await logActivity({entity:'Purchase', entityLabel:(item.tankName||'')+' · '+fmtDateLabel(item.date), action:'delete', summary:`Removed ${liters(item.liters)}`});
-  loadStockReceiptsList();
+  await applyPurchase(item, -1);
+  await logActivity({entity:'Purchase', entityLabel:(item.supplier||item.tankName||'')+' · '+fmtDateLabel(item.date), action:'delete', summary:`Removed ${liters(item.liters)}`});
+  renderPurchase($('#viewMount'));
 }
 
 async function loadStockReceiptsList(){
@@ -1712,12 +1811,23 @@ async function loadStockReceiptsList(){
   const data = await getMonthDoc('stockReceiptsMonthly', monthId);
   const items = (data && data.items || []).slice().sort((a,b)=>b.date.localeCompare(a.date));
   el.innerHTML = `<div class="card"><div class="table-wrap"><table>
-    <thead><tr><th>Date</th><th>Product</th><th>Tank</th><th>Supplier</th><th class="num">Liters</th><th class="num">Rate</th><th class="num">Amount</th><th>Ref</th><th></th></tr></thead>
-    <tbody>${items.length? items.map(it=>`<tr><td>${fmtDateLabel(it.date)}</td><td>${esc(state.config.products[it.product]||it.product||'—')}</td><td>${esc(it.tankName)}</td><td>${esc(it.supplier||'—')}</td><td class="num">${liters(it.liters)}</td><td class="num">${it.rate?money(it.rate):'—'}</td><td class="num">${it.amount?money(it.amount):'—'}</td><td>${esc(it.ref||'—')}</td><td><button class="btn ghost sm" data-edit="${it.id}">${icon('edit')}</button> <button class="btn ghost sm" data-rm="${it.id}">${icon('trash')}</button></td></tr>`).join('') : `<tr><td colspan="9" class="empty">No purchases logged for ${monthLabel(monthId)}.</td></tr>`}</tbody>
-    ${items.length?`<tfoot><tr><td colspan="4" style="font-weight:700;">Total</td><td class="num" style="font-weight:700;">${liters(data.totalLiters)}</td><td></td><td class="num" style="font-weight:700;">${money(data.totalAmount)}</td><td colspan="2"></td></tr></tfoot>`:''}
+    <thead><tr><th>Date</th><th>Supplier</th><th>Product</th><th>Tank</th><th class="num">Liters</th><th class="num">Rate</th><th class="num">Amount</th><th>Payment</th><th>Ref</th><th></th></tr></thead>
+    <tbody>${items.length? items.map(it=>`<tr>
+      <td style="white-space:nowrap;">${fmtDateLabel(it.date)}</td>
+      <td>${esc(supplierName(it.supplierId, it.supplier))}</td>
+      <td>${esc(state.config.products[it.product]||it.product||'—')}</td>
+      <td>${esc(it.tankName||'—')}</td>
+      <td class="num">${liters(it.liters)}</td>
+      <td class="num">${it.rate?money(it.rate):'—'}</td>
+      <td class="num">${it.amount?money(it.amount):'—'}</td>
+      <td><span class="pill ${(!it.payFrom||it.payFrom==='credit')?'warning':'good'}">${esc(purchasePayLabel(it.payFrom))}</span></td>
+      <td>${esc(it.ref||'—')}</td>
+      <td style="white-space:nowrap;"><button class="btn ghost sm" data-pedit="${it.id}">${icon('edit')}</button> <button class="btn ghost sm" data-rm="${it.id}">${icon('trash')}</button></td>
+    </tr>`).join('') : `<tr><td colspan="10" class="empty">No purchases logged for ${monthLabel(monthId)}.</td></tr>`}</tbody>
+    ${items.length?`<tfoot><tr><td colspan="4" style="font-weight:700;">Total</td><td class="num" style="font-weight:700;">${liters(data.totalLiters)}</td><td></td><td class="num" style="font-weight:700;">${money(data.totalAmount)}</td><td colspan="3"></td></tr></tfoot>`:''}
   </table></div></div>`;
-  $$('#stockList [data-edit]').forEach(b=>b.onclick=()=>{
-    const it = items.find(x=>x.id===b.dataset.edit);
+  $$('#stockList [data-pedit]').forEach(b=>b.onclick=()=>{
+    const it = items.find(x=>x.id===b.dataset.pedit);
     if (it) editStockReceipt(monthId, it);
   });
   $$('#stockList [data-rm]').forEach(b=>b.onclick=()=>{
@@ -1727,9 +1837,7 @@ async function loadStockReceiptsList(){
   wireMonthSwitcher(()=>{ loadStockReceiptsList(); });
 }
 
-/* ============================== EXPENSES ============================== */
-const EXPENSE_CATEGORIES = ['Electricity','Maintenance & Repairs','Rent','Statutory / Tax','Bank & Card Charges','Transport','Miscellaneous'];
-
+/* ============================== PAYMENTS / EXPENSES ============================== */
 // Payments / Expenses share one monthly document (expensesMonthly). An item is either
 //   kind:'expense'  — a running cost by category; counts in the P&L expenses line
 //   kind:'payment'  — money paid to a party (supplier, lender, staff advance, owner…), optionally
@@ -1759,7 +1867,7 @@ function renderExpenses(mount){
         <div class="field" id="exCatWrap"><label>Category</label><select id="exCat">${EXPENSE_CATEGORIES.map(c=>`<option>${c}</option>`).join('')}</select></div>
         <div class="field" id="exPartyWrap" style="display:none;"><label>Paid to (party)</label><input type="text" id="exParty" list="exPartyList" placeholder="e.g. HPCL / Ravi (advance) / Bank loan">
           <datalist id="exPartyList">${state.suppliers.filter(s=>s.active!==false).map(s=>`<option value="${esc(s.name)}">`).join('')}${state.staff.filter(s=>s.active!==false).map(s=>`<option value="${esc(s.name)}">`).join('')}</datalist></div>
-        <div class="field" id="exLedgerWrap" style="display:none;"><label>Debit to ledger (optional)</label><select id="exLedger">${receiptLedgerOptions('')}</select></div>
+        <div class="field" id="exLedgerWrap" style="display:none;"><label>Settle / debit to</label><select id="exLedger">${payLedgerOptions('')}</select></div>
         <div class="field" style="grid-column:span 2;"><label>Description</label><input type="text" id="exDesc" placeholder="e.g. July electricity bill / Invoice DO-4521"></div>
         <div class="field"><label>Amount (₹)</label><input type="number" step="0.01" id="exAmt" placeholder="0.00"></div>
         <div class="field"><label>Mode</label><select id="exMode">${RECEIPT_MODES.map(m=>`<option>${m}</option>`).join('')}</select></div>
@@ -1838,7 +1946,7 @@ function expenseEditFields(item){
   return [
     {key:'date', label:'Date', type:'date'},
     ...(expenseKind(item)==='payment'
-      ? [{key:'party', label:'Paid to (party)', type:'text'}, {key:'ledger', label:'Debit to ledger', type:'select', options:[{value:'',label:'— none —'}].concat(state.ledgers.filter(l=>!l.cashInHand).map(l=>({value:'led:'+l.id,label:l.name}))), fmt:v=>targetLabel(v)||'—'}]
+      ? [{key:'party', label:'Paid to (party)', type:'text'}, {key:'ledger', label:'Settle / debit to', type:'select', options:payLedgerList(), fmt:v=>targetLabel(v)||'—'}]
       : [{key:'category', label:'Category', type:'select', options:EXPENSE_CATEGORIES.map(c=>({value:c,label:c}))}]),
     {key:'description', label:'Description', type:'text'},
     {key:'amount', label:'Amount (₹)', type:'number', fmt:v=>money(v)},
@@ -2106,6 +2214,8 @@ async function loadActivityLog(){
 // (staff / product / nozzle / creditor / payment method) and a pick-list of sections. The same
 // configuration drives the on-screen report and the Excel export. Settings are remembered per
 // browser in localStorage as a convenience.
+// A report is chosen from one dropdown; each type maps to the sections it shows, so the on-screen
+// report and the Excel export stay in step.
 const REPORT_SECTIONS = [
   {id:'summary',     label:'P&L summary'},
   {id:'balances',    label:'Cash & bank balances'},
@@ -2115,17 +2225,35 @@ const REPORT_SECTIONS = [
   {id:'duties',      label:'Duties list'},
   {id:'credit',      label:'Credit sales'},
   {id:'oils',        label:'Oil sales'},
+  {id:'stock',       label:'Tank stock'},
   {id:'purchases',   label:'Fuel purchases'},
+  {id:'suppliers',   label:'Supplier balances'},
   {id:'expenses',    label:'Expenses'},
   {id:'payments',    label:'Payments'},
   {id:'salary',      label:'Salary'},
   {id:'journal',     label:'Journal entries'},
   {id:'receipts',    label:'Receipts'},
+  {id:'ledger',      label:'Ledger statements'},
 ];
+const REPORT_TYPES = [
+  {id:'full',     label:'Full report — everything', sections:REPORT_SECTIONS.map(s=>s.id)},
+  {id:'pl',       label:'Profit & Loss', sections:['summary','products','trend','collections']},
+  {id:'sales',    label:'Sales & duties', sections:['summary','duties','products','trend','oils','collections']},
+  {id:'stock',    label:'Stock & purchases', sections:['stock','purchases','suppliers']},
+  {id:'credit',   label:'Credit sales & receipts', sections:['credit','receipts']},
+  {id:'expense',  label:'Payments & expenses', sections:['expenses','payments']},
+  {id:'salary',   label:'Salary', sections:['salary']},
+  {id:'journal',  label:'Journal', sections:['journal']},
+  {id:'ledger',   label:'Ledger statements', sections:['ledger']},
+  {id:'balances', label:'Balances', sections:['balances','suppliers']},
+];
+function reportSections(cfg){
+  const t = REPORT_TYPES.find(x=>x.id===cfg.report) || REPORT_TYPES[0];
+  return t.sections;
+}
 const REPORT_CFG_KEY = 'fuelLedgerReportCfg';
 function defaultReportCfg(){
-  return { preset:'thisMonth', from:'', to:'', compare:'none', staff:'', product:'', nozzle:'', creditor:'', method:'',
-           sections: REPORT_SECTIONS.map(s=>s.id) };
+  return { report:'full', preset:'thisMonth', from:'', to:'', compare:'none', staff:'', product:'', nozzle:'', creditor:'', method:'', ledgerPick:'all' };
 }
 let repCfg = null;
 function loadReportCfg(){
@@ -2213,7 +2341,7 @@ async function computeReport(from, to, f){
       entries.forEach(([nid,n])=>{
         if (n.product && r.byProduct[n.product]){ r.byProduct[n.product].liters += num(n.liters); r.byProduct[n.product].amount += num(n.amount); }
         const nz = state.nozzles.find(z=>z.id===nid);
-        r.nozzleRows.push({date:doc.date, staffName:x.staffName, nozzle: nz?nz.name:nid, product:n.product, opening:n.opening, closing:n.closing, testLiters:n.testLiters, transferLiters:n.transferLiters, liters:n.liters, rate:n.rate, amount:n.amount});
+        r.nozzleRows.push({date:doc.date, staffName:x.staffName, nozzle: nz?nz.name:nid, tankId:n.tankId, product:n.product, opening:n.opening, closing:n.closing, testLiters:n.testLiters, transferLiters:n.transferLiters, liters:n.liters, rate:n.rate, amount:n.amount});
       });
       if (r.payTotals){ const p = x.pay||{}; r.payTotals.pos += num(p.pos); r.payTotals.upi += num(p.upi); r.payTotals.hpCard += num(p.hpCard); r.payTotals.credit += num(p.credit); r.payTotals.cash += num(p.cash); r.payTotals.expenses += num(p.expenses); }
       r.duties.push(Object.assign({date:doc.date, id:dutyId, fuelAmount:dFuel, oilAmount:dOil, liters:dLtr}, {staffName:x.staffName, startTime:x.startTime, endTime:x.endTime, nozzleCount:(x.nozzleIds||[]).length, total:dFuel+dOil, pay:x.pay||{}}));
@@ -2246,6 +2374,80 @@ async function computeReport(from, to, f){
   return r;
 }
 
+// ---- ledger statements -------------------------------------------------------------------
+// Every account the app posts to is addressed by the same key used in Journal (cash, led:, acct:,
+// cred:, sup:). Ledgers are grouped by their accounting group; cash/bank, creditors and suppliers
+// form their own groups so a "group report" covers the whole book.
+function ledgerGroupKeys(){
+  return Object.entries(LEDGER_GROUPS).map(([k,g])=>({key:k, label:g.label}))
+    .concat([{key:'cashbank', label:'Cash & bank'}, {key:'creditors', label:'Creditors (receivable)'}, {key:'suppliers', label:'Suppliers (payable)'}]);
+}
+function ledgerAccountList(){
+  const out = [];
+  const cash = state.ledgers.find(l=>l.cashInHand);
+  if (cash) out.push({key:'cash', label:'Cash in hand', group:'cashbank', balance:num(cash.balance), balanceKind:'dr'});
+  state.accounts.filter(a=>a.kind==='bank').forEach(a=>out.push({key:'acct:'+a.id, label:a.name+' (Bank)', group:'cashbank', balance:num(a.balance), balanceKind:'dr'}));
+  state.accounts.filter(a=>a.kind==='receivable').forEach(a=>out.push({key:'acct:'+a.id, label:a.name, group:'creditors', balance:num(a.balance), balanceKind:'dr'}));
+  state.ledgers.filter(l=>!l.cashInHand).forEach(l=>out.push({key:'led:'+l.id, label:l.name, group:l.group||'asset', balance:num(l.balance), balanceKind:'dr'}));
+  state.creditors.forEach(c=>out.push({key:'cred:'+c.id, label:c.name+' (Creditor)', group:'creditors', balance:num(c.balance), balanceKind:'dr'}));
+  state.suppliers.forEach(s=>out.push({key:'sup:'+s.id, label:s.name+' (Supplier)', group:'suppliers', balance:-num(s.balance), balanceKind:'cr'}));
+  return out;
+}
+// Turns everything recorded in the period into double-entry postings: {key, date, particulars, dr, cr}.
+// dr is positive for a debit, cr positive for a credit. Fuel sales and purchases post against
+// synthetic Sales / Purchases accounts so each real account's statement balances.
+function buildLedgerPostings(r){
+  const p = [];
+  const add = (key, date, particulars, dr, cr, ref)=>{ if (key && (num(dr)||num(cr))) p.push({key, date, particulars, dr:num(dr), cr:num(cr), ref:ref||''}); };
+  r.duties.forEach(d=>{
+    const who = `Duty — ${d.staffName}`;
+    if (num(d.pay.cash)) add('cash', d.date, who, d.pay.cash, 0);
+    if (num(d.pay.pos)+num(d.pay.upi) && d.pay.bankAccountId) add('acct:'+d.pay.bankAccountId, d.date, who+' (POS + UPI)', num(d.pay.pos)+num(d.pay.upi), 0);
+    if (num(d.pay.hpCard)){ const hp = state.accounts.find(a=>a.system && a.hpcl); if (hp) add('acct:'+hp.id, d.date, who+' (HP Card)', d.pay.hpCard, 0); }
+  });
+  r.creditSales.forEach(c=>{ if (c.creditorId) add('cred:'+c.creditorId, c.date, `Credit sale — ${c.staffName}${c.vehicleNo?' · '+c.vehicleNo:''}`, c.amount, 0, c.indentNo||''); });
+  r.purchases.forEach(it=>{
+    const who = `Fuel purchase — ${it.tankName||''}`;
+    if (!it.payFrom || it.payFrom==='credit'){ if (it.supplierId) add('sup:'+it.supplierId, it.date, who, 0, it.amount, it.ref||''); }
+    else add(it.payFrom, it.date, who, 0, it.amount, it.ref||'');
+  });
+  r.expenses.concat(r.payments).forEach(it=>{
+    const who = expenseKind(it)==='payment' ? `Payment — ${it.party||''}` : `Expense — ${it.category||''}`;
+    const label = who + (it.description?' · '+it.description:'');
+    if (it.paidFrom) add(it.paidFrom, it.date, label, 0, it.amount);
+    if (expenseKind(it)==='payment' && it.ledger) add(it.ledger, it.date, label, it.amount, 0);
+  });
+  r.receipts.forEach(it=>{
+    const label = `Receipt — ${receiptFromLabel(it)}${it.narration?' · '+it.narration:''}`;
+    add(it.into||'cash', it.date, label, it.amount, 0, it.reference||'');
+    if (it.type==='creditor' && it.creditorId) add('cred:'+it.creditorId, it.date, label, 0, it.amount, it.reference||'');
+    else if (it.ledger) add(it.ledger, it.date, label, 0, it.amount, it.reference||'');
+  });
+  r.journal.forEach(it=>{
+    const label = it.narration || `${targetLabel(it.debit)||it.debitLabel||''} / ${targetLabel(it.credit)||it.creditLabel||''}`;
+    add(it.debit, it.date, 'Journal — '+label, it.amount, 0);
+    add(it.credit, it.date, 'Journal — '+label, 0, it.amount);
+  });
+  p.sort((a,b)=>a.date.localeCompare(b.date));
+  return p;
+}
+function ledgerStatements(r, pick){
+  const postings = buildLedgerPostings(r);
+  const accounts = ledgerAccountList();
+  const byKey = {};
+  postings.forEach(x=>{ (byKey[x.key] = byKey[x.key]||[]).push(x); });
+  let list = accounts;
+  if (pick && pick!=='all'){
+    if (pick.startsWith('grp:')){ const g = pick.slice(4); list = accounts.filter(a=>a.group===g); }
+    else list = accounts.filter(a=>a.key===pick);
+  }
+  // With "all", skip accounts that had no movement and carry no balance, so the report stays readable.
+  return list.map(a=>{
+    const rows = (byKey[a.key]||[]);
+    const dr = rows.reduce((s,x)=>s+x.dr,0), cr = rows.reduce((s,x)=>s+x.cr,0);
+    return Object.assign({}, a, {rows, dr, cr, movement:dr-cr});
+  }).filter(a=> (pick && pick!=='all' && !pick.startsWith('grp:')) ? true : (a.rows.length || num(a.balance)));
+}
 function deltaPill(cur, prev, opts){
   opts = opts||{};
   const d = num(cur) - num(prev);
@@ -2267,9 +2469,17 @@ async function renderReports(mount){
   const sel = (id, opts, cur, allLabel)=>`<select id="${id}"><option value="">${esc(allLabel)}</option>${opts.map(o=>`<option value="${esc(o.value)}" ${o.value===cur?'selected':''}>${esc(o.label)}</option>`).join('')}</select>`;
   mount.innerHTML = `
     <h1 class="page-title">Reports</h1>
-    <p class="page-sub">Build the report you need — pick a period, compare it, filter it, and choose what to include. The Excel export follows the same settings.</p>
+    <p class="page-sub">Pick the report you need, the period it covers, and any filters. The Excel export follows the same settings.</p>
     <div class="card card-pad" style="margin-bottom:16px;">
       <div class="form-grid">
+        <div class="field" style="grid-column:span 2;"><label>Report</label><select id="rpReport">
+          ${REPORT_TYPES.map(t=>`<option value="${t.id}" ${cfg.report===t.id?'selected':''}>${esc(t.label)}</option>`).join('')}
+        </select></div>
+        <div class="field" id="rpLedgerWrap" style="grid-column:span 2;display:${cfg.report==='ledger'?'':'none'};"><label>Ledger / group</label><select id="rpLedgerPick">
+          <option value="all" ${cfg.ledgerPick==='all'?'selected':''}>All groups (grouped summary + statements)</option>
+          ${ledgerGroupKeys().map(g=>`<option value="grp:${g.key}" ${cfg.ledgerPick==='grp:'+g.key?'selected':''}>Group — ${esc(g.label)}</option>`).join('')}
+          ${ledgerAccountList().map(a=>`<option value="${esc(a.key)}" ${cfg.ledgerPick===a.key?'selected':''}>${esc(a.label)}</option>`).join('')}
+        </select></div>
         <div class="field"><label>Period</label><select id="rpPreset">
           ${[['thisMonth','This month'],['lastMonth','Last month'],['last3','Last 3 months'],['thisQuarter','This quarter (FY)'],['fy','This financial year'],['lastFy','Last financial year'],['custom','Custom dates']].map(([v,l])=>`<option value="${v}" ${cfg.preset===v?'selected':''}>${l}</option>`).join('')}
         </select></div>
@@ -2286,12 +2496,7 @@ async function renderReports(mount){
         <div class="field"><label>Creditor</label>${sel('rpCreditor', state.creditors.map(c=>({value:c.id,label:c.name})), cfg.creditor, 'All creditors')}</div>
         <div class="field"><label>Payment method</label>${sel('rpMethod', [['cash','Cash'],['pos','POS / Card'],['upi','UPI'],['hpCard','HP Card'],['credit','Credit']].map(([v,l])=>({value:v,label:l})), cfg.method, 'All methods')}</div>
       </div>
-      <label style="margin-top:8px;">Sections to include</label>
-      <div class="check-grid" id="rpSections">
-        ${REPORT_SECTIONS.map(s=>`<label class="check-chip ${cfg.sections.includes(s.id)?'checked':''}"><input type="checkbox" value="${s.id}" ${cfg.sections.includes(s.id)?'checked':''}><span>${esc(s.label)}</span></label>`).join('')}
-        <button class="btn ghost sm" id="rpAllSections" type="button">All</button>
-        <button class="btn ghost sm" id="rpNoSections" type="button">None</button>
-      </div>
+      <div class="hint" id="rpIncludes" style="color:var(--text-faint);font-size:12px;margin-top:8px;"></div>
       <div class="row" style="margin-top:14px;">
         <button class="btn primary" id="rpRun">${icon('chart')} Run report</button>
         <button class="btn" id="rpExport" ${window.XLSX?'':'disabled title="Excel library did not load"'}>Export to Excel</button>
@@ -2301,6 +2506,15 @@ async function renderReports(mount){
     </div>
     <div id="repBody"><div class="card empty">Crunching the numbers…</div></div>
   `;
+  const syncReport = ()=>{
+    cfg.report = $('#rpReport').value;
+    $('#rpLedgerWrap').style.display = cfg.report==='ledger' ? '' : 'none';
+    const ids = reportSections(cfg);
+    $('#rpIncludes').textContent = 'Includes: ' + ids.map(id=>(REPORT_SECTIONS.find(s=>s.id===id)||{}).label).filter(Boolean).join(' · ');
+  };
+  $('#rpReport').onchange = ()=>{ syncReport(); };
+  $('#rpLedgerPick').onchange = (e)=>{ cfg.ledgerPick = e.target.value; };
+  syncReport();
   const syncPreset = ()=>{
     const p = $('#rpPreset').value; cfg.preset = p;
     const rng = presetRange(p);
@@ -2313,10 +2527,10 @@ async function renderReports(mount){
   $('#rpTo').onchange = (e)=>{ cfg.to = e.target.value; };
   $('#rpCompare').onchange = (e)=>{ cfg.compare = e.target.value; };
   [['rpStaff','staff'],['rpProduct','product'],['rpNozzle','nozzle'],['rpCreditor','creditor'],['rpMethod','method']].forEach(([id,key])=>{ $('#'+id).onchange = (e)=>{ cfg[key] = e.target.value; }; });
-  const readSections = ()=>{ cfg.sections = $$('#rpSections input:checked').map(i=>i.value); $$('#rpSections .check-chip').forEach(l=>l.classList.toggle('checked', l.querySelector('input').checked)); };
-  $$('#rpSections input').forEach(i=>i.addEventListener('change', readSections));
-  $('#rpAllSections').onclick = ()=>{ $$('#rpSections input').forEach(i=>i.checked=true); readSections(); };
-  $('#rpNoSections').onclick = ()=>{ $$('#rpSections input').forEach(i=>i.checked=false); readSections(); };
+
+
+
+
   $('#rpReset').onclick = ()=>{ repCfg = defaultReportCfg(); saveReportCfg(); renderReports(mount); };
   $('#rpRun').onclick = ()=>runReport();
   $('#rpExport').onclick = ()=>runReport(true);
@@ -2345,13 +2559,13 @@ async function runReport(exportAfter){
 }
 
 function renderReportBody(body, cfg, r, c){
-  const has = (id)=>cfg.sections.includes(id);
+  const has = (id)=>reportSections(cfg).includes(id);
   const title = rangeLabel(r.from, r.to) + (c ? ` <span class="hint" style="font-size:13px;color:var(--text-muted);">vs ${rangeLabel(c.from, c.to)}</span>` : '');
   const filt = [cfg.staff && 'Staff: '+((state.staff.find(s=>s.id===cfg.staff)||{}).name||''), cfg.product && 'Product: '+(state.config.products[cfg.product]||''), cfg.nozzle && 'Nozzle: '+((state.nozzles.find(n=>n.id===cfg.nozzle)||{}).name||''), cfg.creditor && 'Creditor: '+((state.creditors.find(x=>x.id===cfg.creditor)||{}).name||''), cfg.method && 'Method: '+cfg.method].filter(Boolean);
   const P = (k)=> c ? c[k] : null;
   const parts = [];
   parts.push(`<div class="section-head"><h2>${title}</h2><span class="hint">${r.days} day${r.days===1?'':'s'}${filt.length?' · '+esc(filt.join(' · ')):''}</span></div>`);
-  if (!cfg.sections.length){ body.innerHTML = parts.join('') + `<div class="card empty">No sections selected — tick at least one above.</div>`; return; }
+
 
   if (has('summary')) parts.push(`<div class="grid grid-kpi" style="margin-bottom:22px;">
     ${kpi('Fuel sales', r.fuelRevenue, P('fuelRevenue'), liters(r.liters))}
@@ -2448,6 +2662,61 @@ function renderReportBody(body, cfg, r, c){
       rows.map(it=>[fmtDateLabel(it.date), esc(receiptFromLabel(it)), it.type==='creditor'?'Creditor':'Other', money(it.amount), esc(it.into==='cash'?'Cash in hand':((state.accounts.find(a=>'acct:'+a.id===it.into)||{}).name||'')), esc(it.mode||''), esc([it.reference,it.narration].filter(Boolean).join(' · ')||'—')]),
       ['Total','','', money(rows.reduce((s,i)=>s+num(i.amount),0)), '','','']));
   }
+  if (has('stock')){
+    const tanks = state.tanks.filter(t=>t.active!==false);
+    const purchasedByTank = {};
+    r.purchases.forEach(it=>{ purchasedByTank[it.tankId] = (purchasedByTank[it.tankId]||0) + num(it.liters); });
+    const soldByTank = {};
+    r.nozzleRows.forEach(n=>{ const tid = n.tankId; if (tid) soldByTank[tid] = (soldByTank[tid]||0) + num(n.liters); });
+    parts.push(table('Tank stock', [{label:'Tank'},{label:'Product'},{label:'Capacity',num:true},{label:'Received (period)',num:true},{label:'Sold (period)',num:true},{label:'Current stock',num:true},{label:'Fill'}],
+      tanks.map(t=>{
+        const cap = num(t.capacityL)||1, cur = num(t.currentStockL);
+        const pct = clamp((cur/cap)*100,0,100), st = tankLevelStatus(pct);
+        return [esc(t.name), esc(state.config.products[t.product]||t.product||'—'), liters(t.capacityL), liters(purchasedByTank[t.id]||0), liters(soldByTank[t.id]||0), liters(cur), `<span class="pill ${st.cls}">${pct.toFixed(0)}% · ${st.label}</span>`];
+      })));
+    const bowsers = state.creditors.filter(c=>c.isBowser);
+    if (bowsers.length) parts.push(table('Bowsers', [{label:'Bowser'},{label:'Product'},{label:'Capacity',num:true},{label:'Stock',num:true},{label:'Outstanding',num:true}],
+      bowsers.map(c=>[esc(c.name), esc(state.config.products[c.bowserProduct]||c.bowserProduct||'—'), liters(c.bowserCapacityL), liters(c.bowserStockL), money(c.balance)])));
+  }
+  if (has('suppliers')){
+    const purchasedBySup = {}, paidBySup = {};
+    r.purchases.forEach(it=>{ if (it.supplierId) purchasedBySup[it.supplierId] = (purchasedBySup[it.supplierId]||0) + num(it.amount); });
+    r.payments.forEach(it=>{ if ((it.ledger||'').startsWith('sup:')) { const id = it.ledger.slice(4); paidBySup[id] = (paidBySup[id]||0) + num(it.amount); } });
+    parts.push(table('Supplier balances', [{label:'Supplier'},{label:'Phone'},{label:'Opening',num:true},{label:'Purchased (period)',num:true},{label:'Paid (period)',num:true},{label:'Outstanding now',num:true}],
+      state.suppliers.map(s=>[esc(s.name), esc(s.phone||'—'), money(s.openingBalance||0), money(purchasedBySup[s.id]||0), money(paidBySup[s.id]||0), money(s.balance||0)]),
+      ['Total','','', money(Object.values(purchasedBySup).reduce((a,b)=>a+b,0)), money(Object.values(paidBySup).reduce((a,b)=>a+b,0)), money(state.suppliers.reduce((a,s)=>a+num(s.balance),0))]));
+  }
+  if (has('ledger')){
+    const pick = cfg.ledgerPick || 'all';
+    const stmts = ledgerStatements(r, pick);
+    const groups = {};
+    stmts.forEach(s=>{ (groups[s.group] = groups[s.group]||[]).push(s); });
+    const groupLabel = (k)=>(ledgerGroupKeys().find(g=>g.key===k)||{}).label||k;
+    parts.push(`<div class="section-head"><h2>Ledger statements</h2><span class="hint">${stmts.length} account${stmts.length===1?'':'s'} · period transactions with running total</span></div>
+      <div class="banner info">${icon('book')}<div>Each statement lists this period's transactions with a running total, then the account's <strong>current balance</strong> (all-time, as of now). Dr = value received by the account, Cr = value given.</div></div>`);
+    // Group summary first, then a statement per account.
+    parts.push(table('Group summary', [{label:'Group'},{label:'Accounts',num:true},{label:'Debits',num:true},{label:'Credits',num:true},{label:'Net movement',num:true}],
+      Object.entries(groups).map(([g,list])=>[esc(groupLabel(g)), list.length, money(list.reduce((s,x)=>s+x.dr,0)), money(list.reduce((s,x)=>s+x.cr,0)), money(list.reduce((s,x)=>s+x.movement,0))]),
+      ['Total', stmts.length, money(stmts.reduce((s,x)=>s+x.dr,0)), money(stmts.reduce((s,x)=>s+x.cr,0)), money(stmts.reduce((s,x)=>s+x.movement,0))]));
+    Object.entries(groups).forEach(([g,list])=>{
+      parts.push(`<div class="section-head"><h2 style="font-size:14px;">${esc(groupLabel(g))}</h2></div>`);
+      list.forEach(a=>{
+        let run = 0;
+        const rows = a.rows.map(x=>{ run += x.dr - x.cr; return [fmtDateLabel(x.date), esc(x.particulars), esc(x.ref||'—'), x.dr?money(x.dr):'—', x.cr?money(x.cr):'—', ledgerBalanceLabel(run)]; });
+        parts.push(`<div class="card card-pad" style="margin-bottom:12px;">
+          <div class="row" style="justify-content:space-between;margin-bottom:8px;">
+            <strong>${esc(a.label)}</strong>
+            <span class="hint" style="color:var(--text-muted);font-size:12.5px;">Period movement <strong class="mono">${money(a.movement)}</strong> · Current balance <strong class="mono">${ledgerBalanceLabel(a.balance)}</strong></span>
+          </div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Date</th><th>Particulars</th><th>Ref</th><th class="num">Debit</th><th class="num">Credit</th><th class="num">Running</th></tr></thead>
+            <tbody>${rows.length? rows.map(row=>`<tr>${row.map((v,i)=>`<td class="${i>=3?'num':''}">${v}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="6" class="empty">No transactions in this period.</td></tr>`}</tbody>
+            ${rows.length?`<tfoot><tr><td colspan="3" style="font-weight:700;">Total</td><td class="num" style="font-weight:700;">${money(a.dr)}</td><td class="num" style="font-weight:700;">${money(a.cr)}</td><td class="num" style="font-weight:700;">${money(a.movement)}</td></tr></tfoot>`:''}
+          </table></div>
+        </div>`);
+      });
+    });
+  }
   body.innerHTML = parts.join('');
   if (has('products')) drawProductChart($('#chartProduct'), r.byProduct);
   if (has('trend')) drawTrendChart($('#chartTrend'), r.byDay, r.from, r.to, c ? {byDay:c.byDay, from:c.from, to:c.to} : null);
@@ -2458,7 +2727,7 @@ function renderReportBody(body, cfg, r, c){
 function exportReportExcel(rep){
   if (!rep || !window.XLSX) return;
   const {cfg, main:r, cmp:c} = rep;
-  const has = (id)=>cfg.sections.includes(id);
+  const has = (id)=>reportSections(cfg).includes(id);
   const r2 = (n)=> Math.round(num(n)*100)/100;
   const wb = XLSX.utils.book_new();
   const addSheet = (name, rows, widths)=>{
@@ -2517,6 +2786,31 @@ function exportReportExcel(rep){
   if (has('salary')) addSheet('Salary', [['Month', 'Staff', 'Wage type', 'Hours', 'Base (₹)', 'Advance (₹)', 'Deduction (₹)', 'Net (₹)', 'Status', 'Paid date'], ...r.salaryRows.map(s=>[s.month, s.name, s.wageType||'monthly', s.hoursWorked!=null?r2(s.hoursWorked):'', r2(s.baseSalary), r2(s.advance), r2(s.deduction), r2(s.netPaid), s.status||'', s.paidDate||''])], [10, 18, 10, 8, 12, 12, 13, 12, 9, 12]);
   if (has('journal')) addSheet('Journal', [['Date', 'Debit (Dr)', 'Credit (Cr)', 'Amount (₹)', 'Narration', 'By'], ...r.journal.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, targetLabel(it.debit)||it.debitLabel||'', targetLabel(it.credit)||it.creditLabel||'', r2(it.amount), it.narration||'', it.by||''])], [12, 28, 28, 12, 36, 14]);
   if (has('receipts')) addSheet('Receipts', [['Date', 'From', 'Type', 'Amount (₹)', 'Into', 'Mode', 'Reference', 'Narration', 'Ledger', 'By'], ...r.receipts.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, receiptFromLabel(it), it.type==='creditor'?'Creditor':'Other', r2(it.amount), it.into==='cash'?'Cash in hand':((state.accounts.find(a=>'acct:'+a.id===it.into)||{}).name||''), it.mode||'', it.reference||'', it.narration||'', targetLabel(it.ledger)||'', it.by||''])], [12, 24, 10, 12, 18, 12, 14, 30, 22, 14]);
+  if (has('stock')) addSheet('Tank stock', [
+    ['Tank', 'Product', 'Capacity (L)', 'Current stock (L)', 'Fill %'],
+    ...state.tanks.map(t=>[t.name, state.config.products[t.product]||t.product||'', r2(t.capacityL), r2(t.currentStockL), num(t.capacityL)?Math.round((num(t.currentStockL)/num(t.capacityL))*100):'']),
+    [], ['Bowser', 'Product', 'Capacity (L)', 'Stock (L)', 'Outstanding (₹)'],
+    ...state.creditors.filter(c=>c.isBowser).map(c=>[c.name, state.config.products[c.bowserProduct]||c.bowserProduct||'', r2(c.bowserCapacityL), r2(c.bowserStockL), r2(c.balance)]),
+  ], [20, 16, 14, 16, 10]);
+  if (has('suppliers')) addSheet('Suppliers', [
+    ['Supplier', 'Phone', 'Opening (₹)', 'Outstanding now (₹)', 'Notes'],
+    ...state.suppliers.map(s=>[s.name, s.phone||'', r2(s.openingBalance), r2(s.balance), s.notes||'']),
+  ], [24, 14, 14, 18, 30]);
+  if (has('ledger')){
+    const stmts = ledgerStatements(r, cfg.ledgerPick||'all');
+    const groupLabel = (k)=>(ledgerGroupKeys().find(g=>g.key===k)||{}).label||k;
+    const rows = [['Group', 'Account', 'Date', 'Particulars', 'Ref', 'Debit (₹)', 'Credit (₹)', 'Running (₹)']];
+    stmts.forEach(a=>{
+      let run = 0;
+      a.rows.forEach(x=>{ run += x.dr - x.cr; rows.push([groupLabel(a.group), a.label, x.date, x.particulars, x.ref||'', r2(x.dr), r2(x.cr), r2(run)]); });
+      rows.push([groupLabel(a.group), a.label, '', 'TOTAL / current balance', '', r2(a.dr), r2(a.cr), r2(a.balance)], []);
+    });
+    addSheet('Ledger', rows, [22, 26, 12, 40, 14, 14, 14, 16]);
+    addSheet('Ledger summary', [
+      ['Group', 'Account', 'Debits (₹)', 'Credits (₹)', 'Net movement (₹)', 'Current balance (₹)'],
+      ...stmts.map(a=>[groupLabel(a.group), a.label, r2(a.dr), r2(a.cr), r2(a.movement), r2(a.balance)]),
+    ], [22, 26, 14, 14, 18, 20]);
+  }
   if (has('balances')) addSheet('Balances', [
     ['Ledgers', 'Group', 'Balance (₹, Dr +/Cr −)'],
     ...state.ledgers.map(l=>[l.name, (LEDGER_GROUPS[l.group]||{}).label||l.group||'', r2(l.balance)]),
@@ -2604,6 +2898,7 @@ function postingTargets(){
   state.accounts.filter(a=>a.kind==='bank' && a.active!==false).forEach(a=>t.push({key:'acct:'+a.id, label:a.name+' (Bank)', kind:'acct', id:a.id}));
   state.ledgers.filter(l=>l.active!==false && !l.cashInHand).forEach(l=>t.push({key:'led:'+l.id, label:l.name+' ('+(LEDGER_GROUPS[l.group]||{}).label+')', kind:'led', id:l.id, group:l.group}));
   state.creditors.filter(c=>c.active!==false).forEach(c=>t.push({key:'cred:'+c.id, label:c.name+' (Creditor)', kind:'cred', id:c.id}));
+  state.suppliers.filter(s=>s.active!==false).forEach(s=>t.push({key:'sup:'+s.id, label:s.name+' (Supplier)', kind:'sup', id:s.id}));
   return t;
 }
 function targetLabel(key){
@@ -2642,6 +2937,11 @@ async function applyPosting(key, dr, meta){
     const c = state.creditors.find(x=>x.id===id); if (!c) return;
     await state.db.doc('creditors/'+id).update({balance: num(c.balance) + dr});
     c.balance = num(c.balance) + dr;
+  } else if (kind==='sup'){
+    // Supplier balances are stored as "amount we still owe them", so a debit (paying them) lowers it.
+    const s = state.suppliers.find(x=>x.id===id); if (!s) return;
+    await state.db.doc('suppliers/'+id).update({balance: num(s.balance) - dr});
+    s.balance = num(s.balance) - dr;
   }
 }
 async function applyJournalItem(item, sign){
@@ -2862,6 +3162,15 @@ function receiptIntoOptions(sel){
 function receiptLedgerOptions(sel){
   return `<option value="">— none —</option>` + state.ledgers.filter(l=>l.active!==false && !l.cashInHand).map(l=>`<option value="led:${l.id}" ${('led:'+l.id)===sel?'selected':''}>${esc(l.name)} (${esc((LEDGER_GROUPS[l.group]||{}).label||'')})</option>`).join('');
 }
+// Payments can also settle a supplier's outstanding bill, so their options include suppliers.
+function payLedgerOptions(sel){
+  return receiptLedgerOptions(sel) + state.suppliers.filter(s=>s.active!==false).map(s=>`<option value="sup:${s.id}" ${('sup:'+s.id)===sel?'selected':''}>${esc(s.name)} (Supplier — ${money(s.balance||0)} due)</option>`).join('');
+}
+function payLedgerList(){
+  return [{value:'',label:'— none —'}]
+    .concat(state.ledgers.filter(l=>!l.cashInHand).map(l=>({value:'led:'+l.id, label:l.name})))
+    .concat(state.suppliers.map(s=>({value:'sup:'+s.id, label:s.name+' (Supplier)'})));
+}
 function receiptFromLabel(it){
   if (it.type==='creditor'){ const c = state.creditors.find(x=>x.id===it.creditorId); return c ? c.name : (it.creditorName||'—'); }
   return it.fromName || '—';
@@ -3069,6 +3378,7 @@ const SETUP_ENTITY = {
     return f;
   }},
   suppliers: { label:'Supplier', collection:'suppliers', list:()=>state.suppliers, fields:()=>[
+    {key:'balance', label:'Outstanding (₹) — manual correction', type:'number', fmt:v=>money(v)},
     {key:'name', label:'Name', type:'text'},
     {key:'phone', label:'Phone', type:'tel'},
     {key:'notes', label:'Notes', type:'text'},
@@ -3353,10 +3663,11 @@ function renderSetupSuppliers(body){
       <div class="form-grid">
         <div class="field"><label>Supplier name</label><input type="text" id="spName" placeholder="e.g. HPCL"></div>
         <div class="field"><label>Phone</label><input type="tel" id="spPhone" placeholder="Optional"></div>
+        <div class="field"><label>Opening balance (₹ already owed)</label><input type="number" step="0.01" id="spOpening" placeholder="0.00"></div>
         <div class="field" style="grid-column:span 2;"><label>Notes</label><input type="text" id="spNotes" placeholder="Optional"></div>
         <div class="field"><button class="btn primary" id="spAdd" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add supplier</button></div>
       </div>
-      <div class="hint" style="color:var(--text-faint);font-size:12px;">Suppliers show up as suggestions on the fuel purchase form in Stock. Payables to suppliers aren't tracked here yet — purchases are settled outside the app for now.</div>
+      <div class="hint" style="color:var(--text-faint);font-size:12px;">Suppliers are picked on the Purchase tab; what you owe each one is tracked as their outstanding balance and settled from Payments / Expenses.</div>
       <div id="spMsg" style="font-size:13px;"></div>
     </div>
     <div class="card"><div class="table-wrap"><table>
@@ -3373,7 +3684,7 @@ function renderSetupSuppliers(body){
     const name = $('#spName').value.trim();
     if (!name){ $('#spMsg').innerHTML = `<span style="color:var(--critical)">Enter a name.</span>`; return; }
     await state.db.collection('suppliers').add({
-      name, phone:$('#spPhone').value.trim(), notes:$('#spNotes').value.trim(),
+      name, phone:$('#spPhone').value.trim(), notes:$('#spNotes').value.trim(), openingBalance:num($('#spOpening').value), balance:num($('#spOpening').value),
       active:true, createdAt:new Date().toISOString(),
     });
     await logActivity({entity:'Supplier', entityLabel:name, action:'add'});
