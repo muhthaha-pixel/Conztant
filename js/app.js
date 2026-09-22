@@ -2361,6 +2361,8 @@ async function computeReport(from, to, f){
     if (sal && sal.staff){ Object.entries(sal.staff).forEach(([sid,s])=>{ if (!f.staff || sid===f.staff){ r.salaryRows.push(Object.assign({month:m}, s)); r.salary += num(s.netPaid); } }); }
   }
   r.fuelCost = r.purchases.reduce((s,i)=>s+num(i.amount),0);
+  r.stockRates = await latestPurchaseRates(to);
+  r.stockValue = stockValuation(r.stockRates);
   r.expenseTotal = r.expenses.reduce((s,i)=>s+num(i.amount),0);
   const pl = journalPL({items:r.journal}, {items:r.receipts}, {items:r.payments});
   r.otherIncome = pl.income; r.otherExpense = pl.expense;
@@ -2443,6 +2445,46 @@ function ledgerStatements(r, pick){
     return Object.assign({}, a, {rows, dr, cr, movement:dr-cr});
   }).filter(a=> (pick && pick!=='all' && !pick.startsWith('grp:')) ? true : (a.rows.length || num(a.balance)));
 }
+// ---- stock valuation ---------------------------------------------------------------------
+// Fuel in a tank is valued at the most recent purchase rate for that tank, falling back to the
+// latest rate seen for the same product. Scans back up to 24 months from the report's end date.
+async function latestPurchaseRates(uptoDate){
+  const byTank = {}, byProduct = {};
+  let cursor = monthIdOf(uptoDate);
+  for (let i=0; i<24; i++){
+    const data = await getMonthDoc('stockReceiptsMonthly', cursor);
+    ((data&&data.items)||[]).slice().sort((a,b)=>a.date.localeCompare(b.date)).forEach(it=>{
+      if (it.date > uptoDate || !num(it.rate)) return;
+      if (it.tankId) byTank[it.tankId] = {rate:num(it.rate), date:it.date};
+      if (it.product) byProduct[it.product] = {rate:num(it.rate), date:it.date};
+    });
+    cursor = shiftMonth(cursor, -1);
+  }
+  return {byTank, byProduct};
+}
+function valuationRate(rates, tankId, product){
+  const t = rates && rates.byTank[tankId];
+  if (t) return t.rate;
+  const p = rates && rates.byProduct[product];
+  return p ? p.rate : 0;
+}
+// Quantity and cost of every litre the station is holding — tanks plus any bowser stock.
+function stockValuation(rates){
+  const tanks = state.tanks.filter(t=>t.active!==false).map(t=>{
+    const rate = valuationRate(rates, t.id, t.product);
+    const qty = num(t.currentStockL);
+    return {id:t.id, name:t.name, product:t.product, qty, rate, value:qty*rate, capacityL:num(t.capacityL)};
+  });
+  const bowsers = state.creditors.filter(c=>c.isBowser && c.active!==false).map(c=>{
+    const rate = valuationRate(rates, null, c.bowserProduct);
+    const qty = num(c.bowserStockL);
+    return {id:c.id, name:c.name, product:c.bowserProduct, qty, rate, value:qty*rate, bowser:true};
+  });
+  const rows = tanks.concat(bowsers);
+  return {rows, totalQty:rows.reduce((s,x)=>s+x.qty,0), totalValue:rows.reduce((s,x)=>s+x.value,0),
+          tankQty:tanks.reduce((s,x)=>s+x.qty,0), tankValue:tanks.reduce((s,x)=>s+x.value,0)};
+}
+
 function deltaPill(cur, prev, opts){
   opts = opts||{};
   const d = num(cur) - num(prev);
@@ -2557,6 +2599,11 @@ function renderReportBody(body, cfg, r, c){
   const has = (id)=>reportSections(cfg).includes(id);
   const title = rangeLabel(r.from, r.to) + (c ? ` <span class="hint" style="font-size:13px;color:var(--text-muted);">vs ${rangeLabel(c.from, c.to)}</span>` : '');
   const filt = [cfg.staff && 'Staff: '+((state.staff.find(s=>s.id===cfg.staff)||{}).name||''), cfg.product && 'Product: '+(state.config.products[cfg.product]||''), cfg.nozzle && 'Nozzle: '+((state.nozzles.find(n=>n.id===cfg.nozzle)||{}).name||''), cfg.creditor && 'Creditor: '+((state.creditors.find(x=>x.id===cfg.creditor)||{}).name||''), cfg.method && 'Method: '+cfg.method].filter(Boolean);
+  const table = (title, head, rows, foot)=> `<div class="section-head"><h2>${title}</h2><span class="hint">${rows.length} row${rows.length===1?'':'s'}</span></div>
+    <div class="card"><div class="table-wrap"><table><thead><tr>${head.map(h=>`<th class="${h.num?'num':''}">${esc(h.label)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.length? rows.map(row=>`<tr>${row.map((v,i)=>`<td class="${head[i].num?'num':''}">${v}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${head.length}" class="empty">Nothing in this period.</td></tr>`}</tbody>
+    ${foot?`<tfoot><tr>${foot.map((v,i)=>`<td class="${head[i].num?'num':''}" style="font-weight:700;">${v}</td>`).join('')}</tr></tfoot>`:''}</table></div></div>`;
+  const sortD = (a,b)=>b.date.localeCompare(a.date);
   const P = (k)=> c ? c[k] : null;
   const parts = [];
   parts.push(`<div class="section-head"><h2>${title}</h2><span class="hint">${r.days} day${r.days===1?'':'s'}${filt.length?' · '+esc(filt.join(' · ')):''}</span></div>`);
@@ -2584,7 +2631,19 @@ function renderReportBody(body, cfg, r, c){
     if (banks.length>1) cards.push(`<div class="card kpi"><div class="label">All banks</div><div class="value">${moneyShort(banks.reduce((s,a)=>s+num(a.balance),0))}</div><div class="foot">${banks.length} accounts</div></div>`);
     receivables.forEach(a=>cards.push(`<div class="card kpi"><div class="label">${esc(a.name)}</div><div class="value">${moneyShort(a.balance)}</div><div class="foot">receivable</div></div>`));
     if (!banks.length) cards.push(`<div class="card kpi"><div class="label">Bank</div><div class="value">—</div><div class="foot">add one in Setup → Accounts</div></div>`);
-    parts.push(`<div class="section-head"><h2>Cash &amp; bank balances</h2><span class="hint">live, as of now</span></div><div class="grid grid-kpi" style="margin-bottom:8px;">${cards.join('')}</div>`);
+    const sv = r.stockValue || {rows:[], totalQty:0, totalValue:0};
+    cards.push(`<div class="card kpi"><div class="label">Stock on hand</div><div class="value">${moneyShort(sv.totalValue)}</div><div class="foot">${liters(sv.totalQty)} at last purchase cost</div></div>`);
+    const creditorDue = state.creditors.reduce((s,x)=>s+num(x.balance),0);
+    const supplierDue = state.suppliers.reduce((s,x)=>s+num(x.balance),0);
+    cards.push(`<div class="card kpi"><div class="label">Receivable from creditors</div><div class="value">${moneyShort(creditorDue)}</div><div class="foot">${state.creditors.filter(x=>num(x.balance)).length} with dues</div></div>`);
+    cards.push(`<div class="card kpi"><div class="label">Payable to suppliers</div><div class="value ${supplierDue?'critical':''}">${moneyShort(supplierDue)}</div><div class="foot">${state.suppliers.filter(x=>num(x.balance)).length} with dues</div></div>`);
+    parts.push(`<div class="section-head"><h2>Balances</h2><span class="hint">live, as of now</span></div><div class="grid grid-kpi" style="margin-bottom:8px;">${cards.join('')}</div>`);
+    parts.push(table('Stock on hand — quantity &amp; cost', [{label:'Tank / Bowser'},{label:'Product'},{label:'Quantity',num:true},{label:'Cost rate',num:true},{label:'Value',num:true},{label:'Rate from'}],
+      sv.rows.map(x=>{
+        const src = x.bowser ? (r.stockRates.byProduct[x.product]||null) : (r.stockRates.byTank[x.id] || r.stockRates.byProduct[x.product] || null);
+        return [esc(x.name)+(x.bowser?' <span class="hint" style="color:var(--text-faint);">(bowser)</span>':''), esc(state.config.products[x.product]||x.product||'—'), liters(x.qty), x.rate?money(x.rate):'<span class="pill warning">no purchase rate</span>', money(x.value), src?fmtDateLabel(src.date):'—'];
+      }),
+      ['Total','', liters(sv.totalQty), '', money(sv.totalValue), '']));
   }
 
   if (has('products') || has('trend')) parts.push(`<div class="grid grid-2" style="margin-top:14px;">
@@ -2600,11 +2659,6 @@ function renderReportBody(body, cfg, r, c){
       </tbody></table></div></div>`);
   }
 
-  const table = (title, head, rows, foot)=> `<div class="section-head"><h2>${title}</h2><span class="hint">${rows.length} row${rows.length===1?'':'s'}</span></div>
-    <div class="card"><div class="table-wrap"><table><thead><tr>${head.map(h=>`<th class="${h.num?'num':''}">${esc(h.label)}</th>`).join('')}</tr></thead>
-    <tbody>${rows.length? rows.map(row=>`<tr>${row.map((v,i)=>`<td class="${head[i].num?'num':''}">${v}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${head.length}" class="empty">Nothing in this period.</td></tr>`}</tbody>
-    ${foot?`<tfoot><tr>${foot.map((v,i)=>`<td class="${head[i].num?'num':''}" style="font-weight:700;">${v}</td>`).join('')}</tr></tfoot>`:''}</table></div></div>`;
-  const sortD = (a,b)=>b.date.localeCompare(a.date);
 
   if (has('duties')){
     const rows = r.duties.slice().sort(sortD);
@@ -2666,12 +2720,14 @@ function renderReportBody(body, cfg, r, c){
     r.purchases.forEach(it=>{ purchasedByTank[it.tankId] = (purchasedByTank[it.tankId]||0) + num(it.liters); });
     const soldByTank = {};
     r.nozzleRows.forEach(n=>{ const tid = n.tankId; if (tid) soldByTank[tid] = (soldByTank[tid]||0) + num(n.liters); });
-    parts.push(table('Tank stock', [{label:'Tank'},{label:'Product'},{label:'Capacity',num:true},{label:'Received (period)',num:true},{label:'Sold (period)',num:true},{label:'Current stock',num:true},{label:'Fill'}],
+    parts.push(table('Tank stock', [{label:'Tank'},{label:'Product'},{label:'Capacity',num:true},{label:'Received (period)',num:true},{label:'Sold (period)',num:true},{label:'Current stock',num:true},{label:'Cost rate',num:true},{label:'Stock value',num:true},{label:'Fill'}],
       tanks.map(t=>{
         const cap = num(t.capacityL)||1, cur = num(t.currentStockL);
         const pct = clamp((cur/cap)*100,0,100), st = tankLevelStatus(pct);
-        return [esc(t.name), esc(state.config.products[t.product]||t.product||'—'), liters(t.capacityL), liters(purchasedByTank[t.id]||0), liters(soldByTank[t.id]||0), liters(cur), `<span class="pill ${st.cls}">${pct.toFixed(0)}% · ${st.label}</span>`];
-      })));
+        const rate = valuationRate(r.stockRates, t.id, t.product);
+        return [esc(t.name), esc(state.config.products[t.product]||t.product||'—'), liters(t.capacityL), liters(purchasedByTank[t.id]||0), liters(soldByTank[t.id]||0), liters(cur), rate?money(rate):'—', money(cur*rate), `<span class="pill ${st.cls}">${pct.toFixed(0)}% · ${st.label}</span>`];
+      }),
+      ['Total','','','','', liters((r.stockValue||{}).tankQty), '', money((r.stockValue||{}).tankValue), '']));
     const bowsers = state.creditors.filter(c=>c.isBowser);
     if (bowsers.length) parts.push(table('Bowsers', [{label:'Bowser'},{label:'Product'},{label:'Capacity',num:true},{label:'Stock',num:true},{label:'Outstanding',num:true}],
       bowsers.map(c=>[esc(c.name), esc(state.config.products[c.bowserProduct]||c.bowserProduct||'—'), liters(c.bowserCapacityL), liters(c.bowserStockL), money(c.balance)])));
@@ -2762,9 +2818,13 @@ function exportReportExcel(rep){
     }
     if (has('balances')){
       const cash = state.ledgers.find(l=>l.cashInHand);
+      const sv = r.stockValue || {totalQty:0, totalValue:0};
       rows.push(['Balances (as of export)', 'Amount (₹)'], ['Cash in hand', r2(cash?cash.balance:0)]);
       state.accounts.filter(a=>a.kind==='bank').forEach(a=>rows.push([a.name+' (bank)', r2(a.balance)]));
       state.accounts.filter(a=>a.kind==='receivable').forEach(a=>rows.push([a.name+' (receivable)', r2(a.balance)]));
+      rows.push(['Stock on hand (L)', r2(sv.totalQty)], ['Stock on hand (value)', r2(sv.totalValue)],
+        ['Receivable from creditors', r2(state.creditors.reduce((s,x)=>s+num(x.balance),0))],
+        ['Payable to suppliers', r2(state.suppliers.reduce((s,x)=>s+num(x.balance),0))]);
     }
     addSheet('Summary', rows, [34, 18, 22, 14, 14]);
   }
@@ -2820,9 +2880,12 @@ function exportReportExcel(rep){
     ...state.creditors.map(cr=>[cr.name, cr.phone||'', r2(cr.balance), cr.isBowser?r2(cr.bowserStockL):'']),
     [], ['Accounts', 'Kind', 'Balance (₹)'],
     ...state.accounts.map(a=>[a.name, a.kind||'', r2(a.balance)]),
-    [], ['Tanks', 'Product', 'Capacity (L)', 'Current stock (L)'],
-    ...state.tanks.map(t=>[t.name, state.config.products[t.product]||t.product||'', r2(t.capacityL), r2(t.currentStockL)]),
-  ], [24, 16, 16, 16]);
+    [], ['Suppliers', 'Phone', 'Payable (₹)'],
+    ...state.suppliers.map(s=>[s.name, s.phone||'', r2(s.balance)]),
+    [], ['Stock on hand', 'Product', 'Quantity (L)', 'Cost rate (₹/L)', 'Value (₹)', 'Capacity (L)'],
+    ...((r.stockValue&&r.stockValue.rows)||[]).map(x=>[x.name+(x.bowser?' (bowser)':''), state.config.products[x.product]||x.product||'', r2(x.qty), r2(x.rate), r2(x.value), x.capacityL?r2(x.capacityL):'']),
+    ['Total', '', r2((r.stockValue||{}).totalQty), '', r2((r.stockValue||{}).totalValue), ''],
+  ], [24, 16, 16, 18, 16, 16]);
   if (!wb.SheetNames.length) addSheet('Summary', [[station], [`Report — ${label}`], ['No sections selected.']]);
 
   const safeName = station.replace(/[^\w]+/g,'-').replace(/^-|-$/g,'');
