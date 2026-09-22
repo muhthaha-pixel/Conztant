@@ -469,8 +469,8 @@ function loadTodayLog(){
 // no server-side rule layer behind the db capability, so this is a front-door convenience for a
 // shared terminal, not a hard security boundary. See the login screen's own note to the owner.
 const ROLE_TABS = {
-  owner:   ['dashboard','shift','stock','purchase','expenses','salary','reports','receipts','journal','activity','setup'],
-  manager: ['dashboard','shift','stock','purchase','expenses','salary','reports','receipts','journal'],
+  owner:   ['dashboard','shift','stock','purchase','expenses','reports','receipts','journal','activity','setup'],
+  manager: ['dashboard','shift','stock','purchase','expenses','reports','receipts','journal'],
   staff:   ['dashboard','shift'],
 };
 const ROLE_LABEL = {owner:'Owner', manager:'Manager', staff:'Staff'};
@@ -711,7 +711,6 @@ const NAV = [
   {id:'stock', label:'Stock', icon:'tank'},
   {id:'purchase', label:'Purchase', icon:'truck'},
   {id:'expenses', label:'Payments / Expenses', icon:'receipt'},
-  {id:'salary', label:'Salary', icon:'wallet'},
   {id:'reports', label:'Reports', icon:'chart'},
   {id:'receipts', label:'Receipts', icon:'inbox'},
   {id:'journal', label:'Journal', icon:'book'},
@@ -766,7 +765,7 @@ function renderCurrentView(){
     case 'stock': renderStock(mount); break;
     case 'purchase': renderPurchase(mount); break;
     case 'expenses': renderExpenses(mount); break;
-    case 'salary': renderSalary(mount); break;
+
     case 'reports': renderReports(mount); break;
     case 'receipts': renderReceipts(mount); break;
     case 'journal': renderJournal(mount); break;
@@ -2013,9 +2012,8 @@ async function loadExpensesList(){
 /* ============================== SALARY ============================== */
 function renderSalary(mount){
   mount.innerHTML = `
-    <h1 class="page-title">Salary</h1>
-    <p class="page-sub">Monthly salary sheet for your team.</p>
-    <div class="section-head"><h2 id="salMonthTitle"></h2><span id="salMonthLabel"></span></div>
+    <div class="banner info">${icon('wallet')}<div>Monthly salary sheet for your team. Pay figures come from Setup → Staff — monthly salary, or hourly wage times the duty hours logged that month.</div></div>
+    <div class="section-head" style="margin-top:0;"><h2 id="salMonthTitle"></h2><span id="salMonthLabel"></span></div>
     <div class="row" style="margin-bottom:12px;"><button class="btn" id="salGen" ${state.dbReady?'':'disabled'}>${icon('plus')} Add active staff to this month's sheet</button></div>
     <div id="salList"></div>
   `;
@@ -3420,7 +3418,7 @@ function renderSetup(mount){
     <h1 class="page-title">Setup</h1>
     <p class="page-sub">Master data for your station — tanks, nozzles, staff, shifts and today's rates.</p>
     <div class="subtabs" id="setupSubtabs">
-      ${['tanks','nozzles','staff','creditors','suppliers','accounts','ledgers','users','rates','tools'].map(t=>`<button data-t="${t}" class="${state.setupTab===t?'active':''}">${t[0].toUpperCase()+t.slice(1)}</button>`).join('')}
+      ${['tanks','nozzles','staff','salary','creditors','suppliers','accounts','ledgers','users','rates','tools'].map(t=>`<button data-t="${t}" class="${state.setupTab===t?'active':''}">${t[0].toUpperCase()+t.slice(1)}</button>`).join('')}
     </div>
     <div id="setupBody"></div>
   `;
@@ -3434,6 +3432,7 @@ function renderSetup(mount){
     case 'suppliers': renderSetupSuppliers(body); break;
     case 'accounts': renderSetupAccounts(body); break;
     case 'users': renderSetupUsers(body); break;
+    case 'salary': renderSalary(body); break;
     case 'rates': renderSetupRates(body); break;
     case 'ledgers': renderSetupLedgers(body); break;
     case 'tools': renderSetupTools(body); break;
