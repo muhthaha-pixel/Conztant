@@ -469,8 +469,8 @@ function loadTodayLog(){
 // no server-side rule layer behind the db capability, so this is a front-door convenience for a
 // shared terminal, not a hard security boundary. See the login screen's own note to the owner.
 const ROLE_TABS = {
-  owner:   ['dashboard','shift','stock','purchase','expenses','reports','receipts','journal','activity','setup'],
-  manager: ['dashboard','shift','stock','purchase','expenses','reports','receipts','journal'],
+  owner:   ['dashboard','shift','purchase','expenses','reports','receipts','journal','activity','setup'],
+  manager: ['dashboard','shift','purchase','expenses','reports','receipts','journal'],
   staff:   ['dashboard','shift'],
 };
 const ROLE_LABEL = {owner:'Owner', manager:'Manager', staff:'Staff'};
@@ -708,7 +708,6 @@ async function setRateForDate(dateStr, rates){
 const NAV = [
   {id:'dashboard', label:'Dashboard', icon:'home'},
   {id:'shift', label:'Duty Entry', icon:'pump'},
-  {id:'stock', label:'Stock', icon:'tank'},
   {id:'purchase', label:'Purchase', icon:'truck'},
   {id:'expenses', label:'Payments / Expenses', icon:'receipt'},
   {id:'reports', label:'Reports', icon:'chart'},
@@ -762,7 +761,7 @@ function renderCurrentView(){
   switch(state.view){
     case 'dashboard': renderDashboard(mount); break;
     case 'shift': renderShiftEntry(mount); break;
-    case 'stock': renderStock(mount); break;
+
     case 'purchase': renderPurchase(mount); break;
     case 'expenses': renderExpenses(mount); break;
 
@@ -803,7 +802,7 @@ function renderDashboard(mount){
     <div class="row">
       <button class="btn primary" id="qaShift">${icon('pump')} Log a duty</button>
       <button class="btn" id="qaExpense">${icon('receipt')} Log a payment / expense</button>
-      <button class="btn" id="qaStock">${icon('tank')} Record fuel purchase</button>
+      <button class="btn" id="qaStock">${icon('truck')} Record fuel purchase</button>
     </div>
   `;
   renderTankCards($('#dashTanks'), {compact:true});
@@ -1538,26 +1537,6 @@ async function syncDutyExpenses(date, dutyId, expenseItems){
 }
 
 /* ============================== STOCK ============================== */
-function renderStock(mount){
-  mount.innerHTML = `
-    <h1 class="page-title">Tank Stock</h1>
-    <p class="page-sub">Live stock per tank, updated automatically as duties are saved and fuel is purchased. Purchase entry has moved to the <strong>Purchase</strong> tab; the stock report is under <strong>Reports</strong>.</p>
-    <div class="grid grid-2" id="stockTanks" style="margin-bottom:24px;"></div>
-
-    <div class="section-head"><h2>Bowsers (mobile tanks)</h2><span class="hint">filled from station nozzles, tracked as credit</span></div>
-    <div class="grid grid-2" id="stockBowsers" style="margin-bottom:24px;"></div>
-
-    <div class="row">
-      <button class="btn primary" id="stkToPurchase">${icon('truck')} Record a fuel purchase</button>
-      <button class="btn" id="stkToReport">${icon('chart')} Stock report</button>
-    </div>
-  `;
-  renderTankCards($('#stockTanks'), {});
-  renderBowserCards($('#stockBowsers'));
-  $('#stkToPurchase').onclick = ()=>{ state.view='purchase'; renderAll(); };
-  $('#stkToReport').onclick = ()=>{ const cfg = loadReportCfg(); cfg.report = 'stock'; saveReportCfg(); state.view='reports'; renderAll(); };
-}
-
 function renderBowserCards(el){
   if (!el) return;
   const bowsers = state.creditors.filter(c=>c.isBowser && c.active!==false);
@@ -1658,7 +1637,7 @@ function renderPurchase(mount){
         <td class="num">${money(s.openingBalance||0)}</td>
         <td class="num" ${num(s.balance)>0?'style="color:var(--critical);font-weight:600;"':''}>${money(s.balance||0)}</td>
         <td><span class="pill ${s.active!==false?'good':'neutral'}">${s.active!==false?'Active':'Inactive'}</span></td>
-        <td style="white-space:nowrap;"><button class="btn sm" data-pay="${s.id}">Pay</button> <button class="btn ghost sm" data-edit="${s.id}">${icon('edit')}</button> <button class="btn ghost sm" data-toggle="${s.id}" data-cur="${s.active!==false}">${s.active!==false?'Deactivate':'Activate'}</button></td>
+        <td style="white-space:nowrap;"><button class="btn sm" data-pay="${s.id}">Pay</button> <button class="btn ghost sm" data-edit="${s.id}">${icon('edit')}</button> <button class="btn ghost sm" data-toggle="${s.id}" data-cur="${s.active!==false}">${s.active!==false?'Deactivate':'Activate'}</button>${s.active===false?` <button class="btn danger sm" data-delsup="${s.id}">${icon('trash')}</button>`:''}</td>
       </tr>`).join('') : `<tr><td colspan="6" class="empty">No suppliers yet.</td></tr>`}</tbody>
       ${state.suppliers.length?`<tfoot><tr><td colspan="3" style="font-weight:700;">Total owed</td><td class="num" style="font-weight:700;">${money(state.suppliers.reduce((s,x)=>s+num(x.balance),0))}</td><td colspan="2"></td></tr></tfoot>`:''}
     </table></div></div>
@@ -1671,6 +1650,7 @@ function renderPurchase(mount){
   $('#spAdd').onclick = addSupplierFromPurchase;
   $$('#viewMount [data-edit]').forEach(b=>b.onclick=()=>openSetupEditModal('suppliers', b.dataset.edit));
   $$('#viewMount [data-toggle]').forEach(b=>b.onclick=async ()=>{ await state.db.doc('suppliers/'+b.dataset.toggle).update({active: b.dataset.cur!=='true'}); });
+  $$('#viewMount [data-delsup]').forEach(b=>b.onclick=()=>deleteSupplier(b.dataset.delsup, ()=>renderPurchase($('#viewMount'))));
   $$('#viewMount [data-pay]').forEach(b=>b.onclick=()=>{
     const s = state.suppliers.find(x=>x.id===b.dataset.pay);
     if (!s) return;
@@ -1683,6 +1663,23 @@ function renderPurchase(mount){
     if ($('#exAmt')) $('#exAmt').focus();
   });
   loadStockReceiptsList();
+}
+
+// Shared by the Purchase tab and Setup → Suppliers. A supplier still owed money is worth a second
+// warning, since deleting them drops that outstanding balance from the books.
+async function deleteSupplier(id, after){
+  const s = state.suppliers.find(x=>x.id===id);
+  if (!s) return;
+  const owed = num(s.balance);
+  const ok = await confirmModal({
+    title:`Delete ${s.name}?`,
+    body: owed ? `This supplier still shows <strong>${money(owed)}</strong> outstanding. Deleting them permanently removes the supplier and that balance from your books — settle or write it off first if it's real. Past purchase records keep their saved supplier name.` : 'This permanently removes them from Setup. Past purchase records keep their saved supplier name.',
+    confirmLabel:'Delete supplier',
+  });
+  if (!ok) return;
+  await state.db.doc('suppliers/'+id).delete();
+  await logActivity({entity:'Supplier', entityLabel:s.name, action:'delete', summary: owed?`Deleted with ${money(owed)} outstanding`:''});
+  if (after) after();
 }
 
 async function addSupplierFromPurchase(){
@@ -2661,6 +2658,9 @@ function renderReportBody(body, cfg, r, c){
       ['Total','','', money(rows.reduce((s,i)=>s+num(i.amount),0)), '','','']));
   }
   if (has('stock')){
+    parts.push(`<div class="section-head"><h2>Tank levels</h2><span class="hint">live, as of now</span></div>
+      <div class="grid grid-2" id="repTankCards" style="margin-bottom:8px;"></div>
+      <div class="grid grid-2" id="repBowserCards" style="margin-bottom:8px;"></div>`);
     const tanks = state.tanks.filter(t=>t.active!==false);
     const purchasedByTank = {};
     r.purchases.forEach(it=>{ purchasedByTank[it.tankId] = (purchasedByTank[it.tankId]||0) + num(it.liters); });
@@ -2716,6 +2716,10 @@ function renderReportBody(body, cfg, r, c){
     });
   }
   body.innerHTML = parts.join('');
+  if (has('stock')){
+    if ($('#repTankCards')) renderTankCards($('#repTankCards'), {});
+    if ($('#repBowserCards')) renderBowserCards($('#repBowserCards'));
+  }
   if (has('products')) drawProductChart($('#chartProduct'), r.byProduct);
   if (has('trend')) drawTrendChart($('#chartTrend'), r.byDay, r.from, r.to, c ? {byDay:c.byDay, from:c.from, to:c.to} : null);
 }
@@ -3692,14 +3696,7 @@ function renderSetupSuppliers(body){
   $$('[data-toggle]', body).forEach(b=>b.onclick=async ()=>{
     await state.db.doc('suppliers/'+b.dataset.toggle).update({active: b.dataset.cur!=='true'});
   });
-  $$('[data-delete]', body).forEach(b=>b.onclick=async ()=>{
-    const ok = await confirmModal({title:'Delete this supplier?', body:'This permanently removes them from Setup. Past purchase records keep their saved supplier text as-is.', confirmLabel:'Delete supplier'});
-    if (!ok) return;
-    const rec = state.suppliers.find(s=>s.id===b.dataset.delete);
-    await state.db.doc('suppliers/'+b.dataset.delete).delete();
-    await logActivity({entity:'Supplier', entityLabel:rec?rec.name:b.dataset.delete, action:'delete'});
-    renderSetup($('#viewMount'));
-  });
+  $$('[data-delete]', body).forEach(b=>b.onclick=()=>deleteSupplier(b.dataset.delete, ()=>renderSetup($('#viewMount'))));
 }
 
 function renderSetupAccounts(body){
