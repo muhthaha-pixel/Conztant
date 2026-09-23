@@ -1262,29 +1262,59 @@ function dutyPayLabel(key, fallback){
             : kind==='sup' ? state.suppliers.find(x=>x.id===id) : null;
   return (rec && rec.name) || targetLabel(key) || fallback || key;
 }
+// A ledger can name what it is paid *for*: one marked as linking to staff asks which employee, and
+// the amount is booked against that person's salary for the month as an advance. Ledgers created
+// before this existed are matched on their name, so "Salary" or "Staff advance" work straight away.
+function ledgerSubjectType(key){
+  if (!key || !key.startsWith('led:')) return '';
+  const l = state.ledgers.find(x=>x.id===key.slice(4));
+  if (!l) return '';
+  if (l.linkTo) return l.linkTo;
+  return /salary|advance|wage/i.test(l.name||'') ? 'staff' : '';
+}
 function renderDutyExpenseRows(){
   const el = $('#dfExpenseRows'); if(!el) return;
   if (!dutyForm.expenses.length){ el.innerHTML = `<div class="hint" style="color:var(--text-faint);font-size:12.5px;">No payments added.</div>`; recomputePayments(); return; }
-  el.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Account / category</th><th>Description</th><th class="num">Amount</th><th></th></tr></thead><tbody id="dfExpenseTbody"></tbody></table></div>
-    <div class="hint" style="color:var(--text-faint);font-size:12px;margin-top:6px;">Cash paid out during this duty (e.g. small repairs, tea, a staff advance) — it is deducted from the cash you should have in hand and posted to the account you pick. Manage the list under Setup → Ledgers.</div>`;
+  el.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Account / category</th><th>For</th><th>Description</th><th class="num">Amount</th><th></th></tr></thead><tbody id="dfExpenseTbody"></tbody></table></div>
+    <div class="hint" style="color:var(--text-faint);font-size:12px;margin-top:6px;">Cash paid out during this duty (e.g. small repairs, tea, a staff advance) — it is deducted from the cash you should have in hand and posted to the account you pick. Pick a salary or advance account and the amount is booked to that staff member's salary sheet for the month. Manage the list under Setup → Ledgers.</div>`;
   const tbody = $('#dfExpenseTbody');
   dutyForm.expenses.forEach(e=>{
     const tr = document.createElement('tr'); tr.dataset.id = e.id;
     // Older rows stored only a category name; show them selected on the category option.
     const sel = e.account || (e.category ? 'cat:'+e.category : '');
-    tr.innerHTML = `<td><select class="eCat" style="max-width:230px;">${dutyPayAccountOptions(sel)}</select></td>
-      <td><input type="text" class="eDesc" value="${esc(e.description||'')}" style="width:150px;"></td>
+    tr.innerHTML = `<td><select class="eCat" style="max-width:210px;">${dutyPayAccountOptions(sel)}</select></td>
+      <td class="eForCell"></td>
+      <td><input type="text" class="eDesc" value="${esc(e.description||'')}" style="width:140px;"></td>
       <td class="num"><input type="number" step="0.01" class="eAmt" value="${e.amount||0}" style="width:90px;text-align:right;"></td>
       <td><button class="btn ghost sm eRemove">${icon('trash')}</button></td>`;
     tbody.appendChild(tr);
+    const forCell = tr.querySelector('.eForCell');
+    const renderFor = ()=>{
+      const type = ledgerSubjectType(e.account);
+      if (type!=='staff'){ e.subjectType=''; e.subjectId=''; e.subjectName=''; forCell.innerHTML = `<span class="hint" style="color:var(--text-faint);font-size:11.5px;">—</span>`; return; }
+      e.subjectType = 'staff';
+      const staff = state.staff.filter(s=>s.active!==false);
+      forCell.innerHTML = staff.length
+        ? `<select class="eWho" style="width:150px;"><option value="">Select staff…</option>${staff.map(s=>`<option value="${s.id}" ${s.id===e.subjectId?'selected':''}>${esc(s.name)}</option>`).join('')}</select>`
+        : `<span class="hint" style="color:var(--warning);font-size:11.5px;">Add staff in Setup</span>`;
+      const who = forCell.querySelector('.eWho');
+      if (who) who.addEventListener('change', ()=>{
+        e.subjectId = who.value;
+        e.subjectName = (state.staff.find(s=>s.id===who.value)||{}).name || '';
+        recomputePayments();
+      });
+    };
     const sync = ()=>{
       const key = tr.querySelector('.eCat').value;
+      const changedAccount = e.account !== key;
       e.account = key;
       e.category = dutyPayLabel(key, e.category);
       e.description = tr.querySelector('.eDesc').value;
       e.amount = num(tr.querySelector('.eAmt').value);
+      if (changedAccount) renderFor();
       recomputePayments();
     };
+    renderFor();
     tr.querySelector('.eCat').addEventListener('change', sync);
     tr.querySelector('.eDesc').addEventListener('input', sync);
     tr.querySelector('.eAmt').addEventListener('input', sync);
@@ -1368,7 +1398,7 @@ async function saveDutyEntry(){
       startTime:dutyForm.startTime, endTime:dutyForm.endTime, nozzleIds:dutyForm.nozzleIds, entries,
       pay:{pos:dutyForm.pos||0, upi:dutyForm.upi||0, hpCard:dutyForm.hpCard||0, bankAccountId:dutyForm.bankAccountId||''},
       creditSales: dutyForm.creditSales.filter(c=>num(c.amount)>0 || num(c.liters)>0),
-      expenses: dutyForm.expenses.filter(e=>num(e.amount)>0).map(e=>({id:e.id, account:e.account||'', category:e.category||'', description:e.description||'', amount:num(e.amount)})),
+      expenses: dutyForm.expenses.filter(e=>num(e.amount)>0).map(e=>({id:e.id, account:e.account||'', category:e.category||'', description:e.description||'', amount:num(e.amount), subjectType:e.subjectType||'', subjectId:e.subjectId||'', subjectName:e.subjectName||''})),
       oils: (dutyForm.oils||[]).filter(o=>num(o.amount)>0 || num(o.qty)>0)
         .map(o=>({id:o.id, productId:o.productId||'', name:o.name||'', qty:num(o.qty), rate:num(o.rate), amount:num(o.amount)})),
       cashCount: dutyForm.cashCount,
@@ -1477,6 +1507,34 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
     if (amtDelta) patch.balance = num(creditor.balance) + amtDelta;
     if (ltrDelta && creditor.isBowser) patch.bowserStockL = num(creditor.bowserStockL) + ltrDelta;
     if (Object.keys(patch).length) await state.db.doc('creditors/'+cid).update(patch).catch(()=>{});
+  }
+
+  // A till payment made against a staff member's salary or advance is booked to that month's salary
+  // sheet as an advance, so their net pay drops by what they have already been handed. Only the
+  // CHANGE since the last save is applied, and the sheet row is created if it isn't there yet.
+  const advBy = (arr)=>{ const m={}; (arr||[]).forEach(e=>{ if (e.subjectType==='staff' && e.subjectId) m[e.subjectId] = (m[e.subjectId]||0) + num(e.amount); }); return m; };
+  const oldAdv = advBy((prev && prev.expenses) || []), newAdv = advBy(expenses);
+  const advIds = new Set([...Object.keys(oldAdv), ...Object.keys(newAdv)]);
+  if (advIds.size){
+    const salMonth = monthIdOf(date);
+    const salData = (await getMonthDoc('salaryMonthly', salMonth)) || {staff:{}};
+    salData.staff = salData.staff || {};
+    let touched = false;
+    for (const sid of advIds){
+      const delta = (newAdv[sid]||0) - (oldAdv[sid]||0);
+      if (!delta) continue;
+      const person = state.staff.find(s=>s.id===sid);
+      if (!salData.staff[sid]){
+        salData.staff[sid] = {name: person?person.name:'', wageType: person && num(person.hourlyWage)>0 ? 'hourly':'monthly', hoursWorked:null,
+                              baseSalary: person ? num(person.monthlySalary) : 0, advance:0, deduction:0, netPaid:0, status:'pending', paidDate:null};
+      }
+      salData.staff[sid].advance = num(salData.staff[sid].advance) + delta;
+      touched = true;
+    }
+    if (touched){
+      recomputeSalaryTotals(salData);
+      await setMonthDoc('salaryMonthly', salMonth, salData);
+    }
   }
 
   // Till payments post to the account each line names (ledger, creditor or supplier) — the cash side
@@ -1602,6 +1660,18 @@ async function deleteDuty(date, dutyId){
   await syncDutyExpenses(date, dutyId, []);
   for (const o of (d.oils||[])) if (o.productId && num(o.qty)) await adjustOilStock(o.productId, num(o.qty));
   for (const e of (d.expenses||[])) if (e.account && !e.account.startsWith('cat:') && num(e.amount)) await applyPosting(e.account, -num(e.amount), {date, narration:`Deleted duty — ${d.staffName}`, journalId:dutyId});
+  // Salary advances booked by this duty come back off the sheet.
+  const advBack = {};
+  (d.expenses||[]).forEach(e=>{ if (e.subjectType==='staff' && e.subjectId) advBack[e.subjectId] = (advBack[e.subjectId]||0) + num(e.amount); });
+  if (Object.keys(advBack).length){
+    const salMonth = monthIdOf(date);
+    const salData = await getMonthDoc('salaryMonthly', salMonth);
+    if (salData && salData.staff){
+      Object.entries(advBack).forEach(([sid, amt])=>{ if (salData.staff[sid]) salData.staff[sid].advance = num(salData.staff[sid].advance) - amt; });
+      recomputeSalaryTotals(salData);
+      await setMonthDoc('salaryMonthly', salMonth, salData);
+    }
+  }
   const pay = d.pay || {};
   const bankAmt = num(pay.pos) + num(pay.upi);
   if (pay.bankAccountId && bankAmt){
@@ -1643,10 +1713,15 @@ async function syncDutyExpenses(date, dutyId, expenseItems){
   const mine = list.map(e=>{
     const key = e.account||'';
     const label = dutyPayLabel(key, e.category) || EXPENSE_CATEGORIES[0];
-    const base = {id:e.id||uid(), date, description:e.description||'', amount:num(e.amount), source:'duty', dutyId,
-                  account:key, ledger: key.startsWith('cat:') ? '' : key, mode:'Cash', paidFrom:''};
-    return isExpenseLine(key)
-      ? Object.assign(base, {kind:'expense', category:label})
+    const who = e.subjectType==='staff' ? (e.subjectName || (state.staff.find(s=>s.id===e.subjectId)||{}).name || '') : '';
+    const desc = [who, e.description].filter(Boolean).join(' — ');
+    const base = {id:e.id||uid(), date, description:desc, amount:num(e.amount), source:'duty', dutyId,
+                  account:key, ledger: key.startsWith('cat:') ? '' : key, mode:'Cash', paidFrom:'',
+                  subjectType:e.subjectType||'', subjectId:e.subjectId||'', subjectName:who};
+    // A staff payment is part of that month's salary cost, so it always counts as an expense —
+    // the salary sheet's net pay drops by the same advance, leaving the total salary cost unchanged.
+    return (isExpenseLine(key) || who)
+      ? Object.assign(base, {kind:'expense', category: who ? `${label} — ${who}` : label})
       : Object.assign(base, {kind:'payment', party:label, item:'Other payment', category:label});
   });
   data.items = kept.concat(mine);
@@ -3678,6 +3753,7 @@ function renderSetupLedgers(body){
       <div class="form-grid">
         <div class="field"><label>Ledger name</label><input type="text" id="lgName" placeholder="e.g. Discount allowed"></div>
         <div class="field"><label>Group</label><select id="lgGroup">${Object.entries(LEDGER_GROUPS).map(([k,g])=>`<option value="${k}">${esc(g.label)}</option>`).join('')}</select></div>
+        <div class="field"><label>Links to</label><select id="lgLink"><option value="">Nothing — plain ledger</option><option value="staff">A staff member (salary / advance)</option></select></div>
         <div class="field"><label>Opening balance (₹)</label><input type="number" step="0.01" id="lgOpen" placeholder="0.00"></div>
         <div class="field"><label>Opening side</label><select id="lgSide"><option value="dr">Debit (Dr)</option><option value="cr">Credit (Cr)</option></select></div>
         <div class="field"><button class="btn primary" id="lgAdd" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add ledger</button></div>
@@ -3705,7 +3781,7 @@ function renderSetupLedgers(body){
     if (!name){ $('#lgMsg').innerHTML = `<span style="color:var(--critical)">Name the ledger.</span>`; return; }
     if (state.ledgers.some(l=>String(l.name||'').toLowerCase()===name.toLowerCase())){ $('#lgMsg').innerHTML = `<span style="color:var(--critical)">A ledger with that name already exists.</span>`; return; }
     const open = num($('#lgOpen').value) * ($('#lgSide').value==='cr' ? -1 : 1);
-    await state.db.collection('ledgers').add({name, group:$('#lgGroup').value, openingBalance:open, balance:open, active:true, createdAt:new Date().toISOString()});
+    await state.db.collection('ledgers').add({name, group:$('#lgGroup').value, linkTo:$('#lgLink').value, openingBalance:open, balance:open, active:true, createdAt:new Date().toISOString()});
     await logActivity({entity:'Ledger', entityLabel:name, action:'add', summary: open?`Opening balance ${ledgerBalanceLabel(open)}`:''});
     renderSetup($('#viewMount'));
   };
@@ -4116,6 +4192,7 @@ const SETUP_ENTITY = {
   ledgers: { label:'Ledger', collection:'ledgers', list:()=>state.ledgers, fields:()=>[
     {key:'name', label:'Ledger name', type:'text'},
     {key:'group', label:'Group', type:'select', options:Object.entries(LEDGER_GROUPS).map(([k,g])=>({value:k,label:g.label})), fmt:v=>(LEDGER_GROUPS[v]||{}).label||v||'—'},
+    {key:'linkTo', label:'Links to', type:'select', options:[{value:'',label:'Nothing — plain ledger'},{value:'staff',label:'A staff member (salary / advance)'}], fmt:v=>v==='staff'?'Staff member':'—'},
     {key:'balance', label:'Balance (₹, Dr positive / Cr negative) — manual correction', type:'number', fmt:v=>ledgerBalanceLabel(v)},
   ]},
   accounts: { label:'Account', collection:'accounts', list:()=>state.accounts, fields:()=>[
