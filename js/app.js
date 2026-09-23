@@ -2922,6 +2922,26 @@ function buildLedgerPostings(r){
     if (it.type==='creditor' && it.creditorId) add('cred:'+it.creditorId, it.date, label, 0, it.amount, it.reference||'');
     else if (it.ledger) add(it.ledger, it.date, label, 0, it.amount, it.reference||'');
   });
+  // Deposits and settlements entered straight onto an account (Setup → Accounts → Add deposit /
+  // Record settlement) move its balance without going through any of the sources above. Entries
+  // written BY a posting carry a journalId and are already covered, so only manual ones are added —
+  // otherwise the opening balance quietly absorbs whatever these moved.
+  state.accounts.forEach(a=>{
+    (a.ledger||[]).forEach(l=>{
+      if (l.journalId || !l.date || l.date < r.from || l.date > r.to) return;
+      const label = `${l.type==='deposit'?'Deposit':'Settlement'} — ${l.from||l.note||a.name}`;
+      if (l.type==='deposit') add('acct:'+a.id, l.date, label, num(l.amount), 0);
+      else add('acct:'+a.id, l.date, label, 0, num(l.amount));
+    });
+  });
+  // Likewise a payment recorded straight on a creditor (Setup → Creditors → Record payment); the
+  // ones raised through Receipts carry a receiptId and are already counted above.
+  state.creditors.forEach(c=>{
+    (c.payments||[]).forEach(pm=>{
+      if (pm.receiptId || !pm.date || pm.date < r.from || pm.date > r.to) return;
+      add('cred:'+c.id, pm.date, `Payment received — ${c.name}${pm.note?' · '+pm.note:''}`, 0, num(pm.amount));
+    });
+  });
   r.journal.forEach(it=>{
     const label = it.narration || `${targetLabel(it.debit)||it.debitLabel||''} / ${targetLabel(it.credit)||it.creditLabel||''}`;
     add(it.debit, it.date, 'Journal — '+label, it.amount, 0);
@@ -3573,7 +3593,7 @@ function renderReportBody(body, cfg, r, c){
           <div class="table-wrap"><table>
             <thead><tr><th>Date</th><th>Particulars</th><th>Ref</th><th class="num">Debit</th><th class="num">Credit</th><th class="num">Running</th></tr></thead>
             <tbody>
-              <tr><td colspan="3" style="font-style:italic;color:var(--text-muted);">Opening balance — ${esc(fmtDateLabel(r.from))}</td><td class="num">${num(a.opening)>0?money(a.opening):'—'}</td><td class="num">${num(a.opening)<0?money(-a.opening):'—'}</td><td class="num">${ledgerBalanceLabel(a.opening)}</td></tr>
+              <tr><td colspan="3" style="font-style:italic;color:var(--text-muted);">Opening balance — ${esc(fmtDateLabel(r.from))}</td><td class="num">—</td><td class="num">—</td><td class="num">${ledgerBalanceLabel(a.opening)}</td></tr>
               ${rows.length? rows.map(row=>`<tr>${row.map((v,i)=>`<td class="${i>=3?'num':''}">${v}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="6" class="empty">No transactions in this period.</td></tr>`}
             </tbody>
             <tfoot><tr><td colspan="3" style="font-weight:700;">Closing balance</td><td class="num" style="font-weight:700;">${money(a.dr)}</td><td class="num" style="font-weight:700;">${money(a.cr)}</td><td class="num" style="font-weight:700;">${ledgerBalanceLabel(a.closing)}</td></tr></tfoot>
