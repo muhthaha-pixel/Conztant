@@ -973,7 +973,8 @@ function renderDutyForm(mount){
         <div class="field"><label>Oil sales (₹)</label><input type="text" id="dfOilTotal" value="₹0" disabled></div>
         <div class="field"><label>POS / Card (₹)</label><input type="number" step="0.01" id="dfPos" value="${dutyForm.pos||0}"></div>
         <div class="field"><label>UPI (₹)</label><input type="number" step="0.01" id="dfUpi" value="${dutyForm.upi||0}"></div>
-        <div class="field"><label>HP Card (₹)</label><input type="number" step="0.01" id="dfHp" value="${dutyForm.hpCard||0}"></div>
+        <div class="field"><label>HP Card (₹)</label><input type="number" step="0.01" id="dfHp" value="${dutyForm.hpCard||0}">
+          <div class="hint" style="font-size:11px;color:var(--text-faint);margin-top:3px;">${hpCardSupplier() ? 'reduces '+esc(hpCardSupplier().name)+"'s dues" : 'tick a supplier in Setup to net this off their dues'}</div></div>
         <div class="field"><label>Credit (₹)</label><input type="text" id="dfCreditTotal" value="₹0" disabled></div>
         <div class="field"><label>Payments (₹)</label><input type="text" id="dfExpenseTotal" value="₹0" disabled></div>
         <div class="field"><label>Cash (balance)</label><input type="text" id="dfCash" value="₹0" disabled></div>
@@ -1625,21 +1626,12 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
   const cashDelta = cash - num(prevPay.cash);
   if (cashDelta) await applyPosting('cash', cashDelta, {date, narration:`Duty cash — ${staffName}`, journalId:id});
 
-  // HP Card sales are settled by HPCL later, not paid to the station same-day — auto-credit the
-  // standing HPCL receivable account (created on first use) by the change in HP Card amount.
+  // HP Card sales are not paid to the station on the day — the oil company nets them off against
+  // what the station owes it. When a supplier is marked as settling HP Card, the amount reduces that
+  // supplier's outstanding balance exactly as a payment to them would; otherwise it falls back to a
+  // standing receivable account, created on first use.
   const hpDelta = num(pay.hpCard) - num(prevPay.hpCard);
-  if (hpDelta){
-    let hpAcct = state.accounts.find(a=>a.system && a.hpcl);
-    if (hpAcct){
-      await state.db.doc('accounts/'+hpAcct.id).update({balance: num(hpAcct.balance) + hpDelta}).catch(()=>{});
-    } else {
-      const ref = await state.db.collection('accounts').add({
-        name:'HPCL — HP Card settlement', kind:'receivable', system:true, hpcl:true,
-        bankName:'', accountNo:'', balance:hpDelta, active:true, createdAt:new Date().toISOString(),
-      });
-      state.accounts.push({id:ref.id, name:'HPCL — HP Card settlement', kind:'receivable', system:true, hpcl:true, balance:hpDelta, active:true});
-    }
-  }
+  if (hpDelta) await postHpCard(hpDelta, {date, narration:`HP Card sales — ${staffName}`, journalId:id});
 
   await logActivity({
     entity:'Duty', entityLabel:`${staffName} · ${fmtDateLabel(date)}`,
@@ -1713,10 +1705,7 @@ async function deleteDuty(date, dutyId){
     const acct = state.accounts.find(a=>a.id===pay.bankAccountId);
     if (acct) await state.db.doc('accounts/'+acct.id).update({balance: num(acct.balance) - bankAmt}).catch(()=>{});
   }
-  if (num(pay.hpCard)){
-    const hpAcct = state.accounts.find(a=>a.system && a.hpcl);
-    if (hpAcct) await state.db.doc('accounts/'+hpAcct.id).update({balance: num(hpAcct.balance) - num(pay.hpCard)}).catch(()=>{});
-  }
+  if (num(pay.hpCard)) await postHpCard(-num(pay.hpCard), {date, narration:`Deleted duty — ${d.staffName}`, journalId:dutyId});
   if (num(pay.cash)) await applyPosting('cash', -num(pay.cash), {date, narration:`Deleted duty — ${d.staffName}`, journalId:dutyId});
 
   delete data.duties[dutyId];
@@ -1727,6 +1716,32 @@ async function deleteDuty(date, dutyId){
   await logActivity({entity:'Duty', entityLabel:`${d.staffName} · ${fmtDateLabel(date)}`, action:'delete', summary:`Deleted duty totalling ${money(d.dutyAmount)}`});
   dutyForm = null;
   renderCurrentView();
+}
+
+// The supplier HP Card sales are netted off against, if one has been marked for it in Setup.
+function hpCardSupplier(){ return state.suppliers.find(s=>s.hpCardSettles && s.active!==false) || null; }
+function hpCardTargetKey(){
+  const sup = hpCardSupplier();
+  if (sup) return 'sup:'+sup.id;
+  const acct = state.accounts.find(a=>a.system && a.hpcl);
+  return acct ? 'acct:'+acct.id : '';
+}
+// Applies `delta` of HP Card value: to the designated supplier (reducing what is owed to them) or,
+// failing that, to the standing HPCL receivable account.
+async function postHpCard(delta, meta){
+  if (!delta) return;
+  const sup = hpCardSupplier();
+  if (sup){ await applyPosting('sup:'+sup.id, delta, meta); return; }
+  const hpAcct = state.accounts.find(a=>a.system && a.hpcl);
+  if (hpAcct){
+    await state.db.doc('accounts/'+hpAcct.id).update({balance: num(hpAcct.balance) + delta}).catch(()=>{});
+    hpAcct.balance = num(hpAcct.balance) + delta;
+    return;
+  }
+  const rec = {name:'HPCL — HP Card settlement', kind:'receivable', system:true, hpcl:true,
+               bankName:'', accountNo:'', balance:delta, active:true, createdAt:new Date().toISOString()};
+  const ref = await state.db.collection('accounts').add(rec);
+  state.accounts.push(Object.assign({id:ref.id}, rec));
 }
 
 async function syncDutyExpenses(date, dutyId, expenseItems){
@@ -1864,7 +1879,7 @@ function renderPurchase(mount){
     <div class="card"><div class="table-wrap"><table>
       <thead><tr><th>Supplier</th><th>Phone</th><th class="num">Opening</th><th class="num">Outstanding</th><th>Status</th><th></th></tr></thead>
       <tbody>${state.suppliers.length? state.suppliers.map(s=>`<tr>
-        <td>${esc(s.name)}${s.notes?`<div class="hint" style="font-size:11px;color:var(--text-faint)">${esc(s.notes)}</div>`:''}</td>
+        <td>${esc(s.name)}${s.hpCardSettles?` <span class="pill good" title="HP Card sales reduce this supplier's balance">HP Card</span>`:''}${s.notes?`<div class="hint" style="font-size:11px;color:var(--text-faint)">${esc(s.notes)}</div>`:''}</td>
         <td>${esc(s.phone||'—')}</td>
         <td class="num">${money(s.openingBalance||0)}</td>
         <td class="num" ${num(s.balance)>0?'style="color:var(--critical);font-weight:600;"':''}>${money(s.balance||0)}</td>
@@ -2885,7 +2900,7 @@ function buildLedgerPostings(r){
     const who = `Duty — ${d.staffName}`;
     if (num(d.pay.cash)) add('cash', d.date, who, d.pay.cash, 0);
     if (num(d.pay.pos)+num(d.pay.upi) && d.pay.bankAccountId) add('acct:'+d.pay.bankAccountId, d.date, who+' (POS + UPI)', num(d.pay.pos)+num(d.pay.upi), 0);
-    if (num(d.pay.hpCard)){ const hp = state.accounts.find(a=>a.system && a.hpcl); if (hp) add('acct:'+hp.id, d.date, who+' (HP Card)', d.pay.hpCard, 0); }
+    if (num(d.pay.hpCard)){ const k = hpCardTargetKey(); if (k) add(k, d.date, who+' (HP Card)', d.pay.hpCard, 0); }
   });
   r.creditSales.forEach(c=>{ if (c.creditorId) add('cred:'+c.creditorId, c.date, `Credit sale — ${c.staffName}${c.vehicleNo?' · '+c.vehicleNo:''}`, c.amount, 0, c.indentNo||''); });
   r.purchases.forEach(it=>{
@@ -4445,6 +4460,7 @@ const SETUP_ENTITY = {
     {key:'name', label:'Name', type:'text'},
     {key:'phone', label:'Phone', type:'tel'},
     {key:'notes', label:'Notes', type:'text'},
+    {key:'hpCardSettles', label:'HP Card sales settle against this supplier', type:'checkbox', fmt:v=>v?'Yes':'No'},
   ]},
   fixedCosts: { label:'Fixed cost', collection:'fixedCosts', list:()=>state.fixedCosts, fields:()=>[
     {key:'name', label:'Name', type:'text'},
