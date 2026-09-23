@@ -2857,6 +2857,7 @@ async function computeReport(from, to, f){
   r.expenseTotal = r.expenses.reduce((s,i)=>s+num(i.amount),0) + (r.basis==='accrual' ? r.fixedAccrued : 0);
   const pl = journalPL({items:r.journal}, {items:r.receipts}, {items:r.payments});
   r.otherIncome = pl.income; r.otherExpense = pl.expense; r.reversedPostings = pl.reversed;
+  r.otherExpenseDetail = pl.byExpense; r.otherIncomeDetail = pl.byIncome;
 
   // Trading account:
   //   Gross P&L = Sales + Closing stock − Opening stock − Purchases
@@ -3261,14 +3262,19 @@ function renderReportBody(body, cfg, r, c){
     // debit side. Each side is built as its own list and the two are paired row by row.
     const plDr = [], plCr = [];
     if (gross < 0) plDr.push(['To Gross Loss b/d', -gross]); else plCr.push(['By Gross Profit b/d', gross]);
-    // On the accrued basis the fixed charges are shown on their own line, so the split is visible.
-    if (r.basis==='accrual' && num(r.fixedAccrued)){
-      plDr.push(['To Fixed costs (accrued)', r.fixedAccrued], ['To Other running expenses', r.expenseTotal - r.fixedAccrued]);
-    } else {
-      plDr.push(['To Running expenses', r.expenseTotal]);
-    }
-    plDr.push(['To Salary', r.salary], ['To Other expenses (journal)', r.otherExpense]);
-    plCr.push(['By Other income', r.otherIncome]);
+    // Expenses are listed head by head rather than as one "running expenses" figure, largest first.
+    if (r.basis==='accrual') (r.fixedLines||[]).forEach(fx=>{ if (num(fx.accrued)) plDr.push([`To ${esc(fx.name)} (accrued)`, fx.accrued]); });
+    const byHead = {};
+    r.expenses.forEach(it=>{ const k = it.category || 'Other'; byHead[k] = (byHead[k]||0) + num(it.amount); });
+    Object.entries(byHead).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>plDr.push([`To ${esc(k)}`, v]));
+    if (num(r.salary)) plDr.push(['To Salary', r.salary]);
+    Object.entries(r.otherExpenseDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1])
+      .forEach(([k,v])=>plDr.push([`To ${esc(k)}`, v]));
+    // Nothing at all on the debit side still needs a line, so the account reads sensibly.
+    if (!plDr.length) plDr.push(['To Expenses', 0]);
+    const incomeHeads = Object.entries(r.otherIncomeDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]);
+    if (incomeHeads.length) incomeHeads.forEach(([k,v])=>plCr.push([`By ${esc(k)}`, v]));
+    else plCr.push(['By Other income', r.otherIncome]);
     if (net >= 0) plDr.push(['To Net Profit', net]); else plCr.push(['By Net Loss', -net]);
     const plRows = Array.from({length: Math.max(plDr.length, plCr.length)}, (_, i)=>[plDr[i]||null, plCr[i]||null]);
     const plDrTotal = plDr.reduce((s,x)=>s+num(x[1]), 0);
@@ -3625,10 +3631,16 @@ function exportReportExcel(rep){
           // Same pairing as on screen: gross loss sits on the debit side, gross profit on the credit side.
           const dr = [], cr = [];
           if (g < 0) dr.push(['To Gross Loss b/d', r2(-g)]); else cr.push(['By Gross Profit b/d', r2(g)]);
-          if (r.basis==='accrual' && num(r.fixedAccrued)) dr.push(['To Fixed costs (accrued)', r2(r.fixedAccrued)], ['To Other running expenses', r2(r.expenseTotal - r.fixedAccrued)]);
-          else dr.push(['To Running expenses', r2(r.expenseTotal)]);
-          dr.push(['To Salary', r2(r.salary)], ['To Other expenses (journal)', r2(r.otherExpense)]);
-          cr.push(['By Other income', r2(r.otherIncome)]);
+          if (r.basis==='accrual') (r.fixedLines||[]).forEach(fx=>{ if (num(fx.accrued)) dr.push([`To ${fx.name} (accrued)`, r2(fx.accrued)]); });
+          const byHead = {};
+          r.expenses.forEach(it=>{ const k = it.category || 'Other'; byHead[k] = (byHead[k]||0) + num(it.amount); });
+          Object.entries(byHead).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>dr.push([`To ${k}`, r2(v)]));
+          if (num(r.salary)) dr.push(['To Salary', r2(r.salary)]);
+          Object.entries(r.otherExpenseDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>dr.push([`To ${k}`, r2(v)]));
+          if (!dr.length) dr.push(['To Expenses', 0]);
+          const incHeads = Object.entries(r.otherIncomeDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]);
+          if (incHeads.length) incHeads.forEach(([k,v])=>cr.push([`By ${k}`, r2(v)]));
+          else cr.push(['By Other income', r2(r.otherIncome)]);
           if (n >= 0) dr.push(['To Net Profit', r2(n)]); else cr.push(['By Net Loss', r2(-n)]);
           const out = [];
           for (let i=0; i<Math.max(dr.length, cr.length); i++) out.push([(dr[i]||['',''])[0], (dr[i]||['',''])[1], (cr[i]||['',''])[0], (cr[i]||['',''])[1]]);
@@ -3888,28 +3900,32 @@ function journalPL(journalData, receiptsData, paymentsData){
   const reversed = [];
   const groupOf = (key)=>{ if (!key || !key.startsWith('led:')) return null; const l = state.ledgers.find(x=>x.id===key.slice(4)); return l ? l.group : null; };
   const ledName = (key)=>targetLabel(key) || key || '';
+  // Per-ledger totals as well, so the P&L can list each account rather than one lump.
+  const byExpense = {}, byIncome = {};
+  const plainName = (key)=>{ const l = state.ledgers.find(x=>x.id===String(key).slice(4)); return (l&&l.name) || ledName(key); };
+  const bump = (map, key, amt)=>{ const n = plainName(key); map[n] = (map[n]||0) + amt; };
   ((journalData&&journalData.items)||[]).forEach(it=>{
     const a = num(it.amount);
     const dg = groupOf(it.debit), cg = groupOf(it.credit);
     if (dg==='income'){ income -= a; reversed.push({source:'Journal', date:it.date, label:it.narration||ledName(it.debit), amount:a, why:`debits the income ledger ${ledName(it.debit)}`}); }
-    if (cg==='income') income += a;
-    if (dg==='expense') expense += a;
-    if (cg==='expense'){ expense -= a; reversed.push({source:'Journal', date:it.date, label:it.narration||ledName(it.credit), amount:a, why:`credits the expense ledger ${ledName(it.credit)}`}); }
+    if (cg==='income'){ income += a; bump(byIncome, it.credit, a); }
+    if (dg==='expense'){ expense += a; bump(byExpense, it.debit, a); }
+    if (cg==='expense'){ expense -= a; bump(byExpense, it.credit, -a); reversed.push({source:'Journal', date:it.date, label:it.narration||ledName(it.credit), amount:a, why:`credits the expense ledger ${ledName(it.credit)}`}); }
   });
   ((receiptsData&&receiptsData.items)||[]).forEach(it=>{
     const g = groupOf(it.ledger); const a = num(it.amount);
-    if (g==='income') income += a;
-    if (g==='expense'){ expense -= a; reversed.push({source:'Receipt', date:it.date, label:receiptFromLabel(it), amount:a, why:`credits the expense ledger ${ledName(it.ledger)}`}); }
+    if (g==='income'){ income += a; bump(byIncome, it.ledger, a); }
+    if (g==='expense'){ expense -= a; bump(byExpense, it.ledger, -a); reversed.push({source:'Receipt', date:it.date, label:receiptFromLabel(it), amount:a, why:`credits the expense ledger ${ledName(it.ledger)}`}); }
   });
   ((paymentsData&&paymentsData.items)||[]).forEach(it=>{
     // A staff advance is a prepayment whatever ledger it was posted to — the cost is recognised on
     // the salary sheet when the salary falls due, so it never reaches the P&L here.
     if (it.subjectType==='staff') return;
     const g = groupOf(it.ledger); const a = num(it.amount);
-    if (g==='expense') expense += a;
+    if (g==='expense'){ expense += a; bump(byExpense, it.ledger, a); }
     if (g==='income'){ income -= a; reversed.push({source:'Payment', date:it.date, label:it.party||it.item||'', amount:a, why:`debits the income ledger ${ledName(it.ledger)}`}); }
   });
-  return {income, expense, reversed};
+  return {income, expense, reversed, byExpense, byIncome};
 }
 
 function renderSetupLedgers(body){
