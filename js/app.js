@@ -2501,6 +2501,7 @@ const REPORT_SECTIONS = [
   {id:'oils',        label:'Oil sales'},
   {id:'stock',       label:'Tank stock'},
   {id:'purchases',   label:'Fuel purchases'},
+  {id:'creditors',   label:'Creditor balances'},
   {id:'suppliers',   label:'Supplier balances'},
   {id:'expenses',    label:'Expenses'},
   {id:'payments',    label:'Payments'},
@@ -2514,6 +2515,7 @@ const REPORT_TYPES = [
   {id:'pl',       label:'Profit & Loss', sections:['summary','products','trend','collections']},
   {id:'sales',    label:'Sales & duties', sections:['summary','duties','products','trend','oils','collections']},
   {id:'stock',    label:'Stock & purchases', sections:['stock','purchases','suppliers']},
+  {id:'creditors', label:'Creditors — balances & dues', sections:['creditors','credit','receipts']},
   {id:'credit',   label:'Credit sales & receipts', sections:['credit','receipts']},
   {id:'expense',  label:'Payments & expenses', sections:['expenses','payments']},
   {id:'salary',   label:'Salary', sections:['salary']},
@@ -3132,6 +3134,37 @@ function renderReportBody(body, cfg, r, c){
       rows.map(d=>[fmtDateLabel(d.date), esc(d.staffName), esc((d.startTime||'—')+'–'+(d.endTime||'—')), d.nozzleCount, liters(d.liters), money(d.fuelAmount), money(d.oilAmount), money(d.total), ...(cfg.method?[money(d.pay[cfg.method])]:[])]),
       ['Total','','','', liters(r.liters), money(r.fuelRevenue), money(r.oilRevenue), money(r.revenue), ...(cfg.method?[money(rows.reduce((s,d)=>s+num(d.pay[cfg.method]),0))]:[])]));
   }
+  if (has('creditors')){
+    // Movement in the period, per creditor. The closing figure is the live balance; the opening is
+    // that balance wound back over this period's sales, receipts and journal postings.
+    const soldTo = {}, ltrTo = {}, recdFrom = {}, jnlTo = {};
+    r.creditSales.forEach(x=>{ if (x.creditorId){ soldTo[x.creditorId] = (soldTo[x.creditorId]||0) + num(x.amount); ltrTo[x.creditorId] = (ltrTo[x.creditorId]||0) + num(x.liters); } });
+    r.receipts.forEach(x=>{ if (x.type==='creditor' && x.creditorId) recdFrom[x.creditorId] = (recdFrom[x.creditorId]||0) + num(x.amount); });
+    r.journal.forEach(it=>{
+      if ((it.debit||'').startsWith('cred:')) jnlTo[it.debit.slice(5)] = (jnlTo[it.debit.slice(5)]||0) + num(it.amount);
+      if ((it.credit||'').startsWith('cred:')) jnlTo[it.credit.slice(5)] = (jnlTo[it.credit.slice(5)]||0) - num(it.amount);
+    });
+    const list = state.creditors.filter(c=> cfg.creditor ? c.id===cfg.creditor : true);
+    const rows = list.map(c=>{
+      const sold = soldTo[c.id]||0, recd = recdFrom[c.id]||0, jnl = jnlTo[c.id]||0;
+      const closing = num(c.balance);
+      const opening = closing - sold + recd - jnl;
+      const overLimit = num(c.creditLimit) && closing > num(c.creditLimit);
+      return {c, sold, recd, jnl, opening, closing, overLimit};
+    });
+    const t = (k)=>rows.reduce((s,x)=>s+num(x[k]),0);
+    parts.push(table('Creditor balances', [{label:'Creditor'},{label:'Phone'},{label:'Opening',num:true},{label:'Credit sales',num:true},{label:'Received',num:true},{label:'Outstanding now',num:true},{label:'Credit limit',num:true},{label:'Status'}],
+      rows.map(x=>[
+        esc(x.c.name) + (x.c.isBowser?' <span class="hint" style="color:var(--text-faint);">(bowser)</span>':'') + (num(ltrTo[x.c.id])?`<div class="hint" style="font-size:11px;color:var(--text-faint)">${liters(ltrTo[x.c.id])} taken</div>`:''),
+        esc(x.c.phone||'—'), money(x.opening), money(x.sold), money(x.recd),
+        `<strong>${money(x.closing)}</strong>`,
+        num(x.c.creditLimit)?money(x.c.creditLimit):'—',
+        x.overLimit ? '<span class="pill critical">over limit</span>' : (x.closing>0 ? '<span class="pill warning">due</span>' : '<span class="pill good">settled</span>'),
+      ]),
+      ['Total','', money(t('opening')), money(t('sold')), money(t('recd')), money(t('closing')), '', '']));
+    const due = rows.filter(x=>x.closing>0).length, over = rows.filter(x=>x.overLimit).length;
+    parts.push(`<div class="hint" style="color:var(--text-faint);font-size:12px;margin:-4px 0 4px;">${rows.length} creditor(s) · ${due} with dues · ${over} over their credit limit. Opening is derived from the current balance less this period's movement; a per-creditor statement with every transaction is under the <strong>Ledger statements</strong> report.</div>`);
+  }
   if (has('credit')){
     const rows = r.creditSales.slice().sort(sortD);
     parts.push(table('Credit sales', [{label:'Date'},{label:'Creditor'},{label:'Staff'},{label:'Indent'},{label:'Vehicle'},{label:'Liters',num:true},{label:'Amount',num:true}],
@@ -3366,6 +3399,11 @@ function exportReportExcel(rep){
     [], ['Bowser', 'Product', 'Capacity (L)', 'Stock (L)', 'Outstanding (₹)'],
     ...state.creditors.filter(c=>c.isBowser).map(c=>[c.name, state.config.products[c.bowserProduct]||c.bowserProduct||'', r2(c.bowserCapacityL), r2(c.bowserStockL), r2(c.balance)]),
   ], [20, 16, 14, 16, 10]);
+  if (has('creditors')) addSheet('Creditors', [
+    ['Creditor', 'Phone', 'Vehicle', 'Credit limit (₹)', 'Outstanding (₹)', 'Bowser stock (L)', 'Status'],
+    ...state.creditors.filter(c=>cfg.creditor?c.id===cfg.creditor:true).map(c=>[c.name, c.phone||'', c.vehicleNo||'', r2(c.creditLimit), r2(c.balance), c.isBowser?r2(c.bowserStockL):'', num(c.creditLimit)&&num(c.balance)>num(c.creditLimit)?'Over limit':(num(c.balance)>0?'Due':'Settled')]),
+    ['Total', '', '', '', r2(state.creditors.reduce((s,c)=>s+num(c.balance),0)), '', ''],
+  ], [24, 14, 14, 16, 18, 16, 12]);
   if (has('suppliers')) addSheet('Suppliers', [
     ['Supplier', 'Phone', 'Opening (₹)', 'Outstanding now (₹)', 'Notes'],
     ...state.suppliers.map(s=>[s.name, s.phone||'', r2(s.openingBalance), r2(s.balance), s.notes||'']),
