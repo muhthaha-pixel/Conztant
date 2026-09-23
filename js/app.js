@@ -4883,25 +4883,28 @@ function renderSetupAccounts(body){
         <div class="field"><label>Bank</label><input type="text" id="acBank" placeholder="e.g. State Bank of India"></div>
         <div class="field"><label>Account number</label><input type="text" id="acNo" placeholder="Optional"></div>
         <div class="field"><label>Opening balance (₹)</label><input type="number" step="0.01" id="acOpen" placeholder="0.00"></div>
+        <div class="field"><label>Opening balance as at</label><input type="date" id="acOpenDate" value="${monthIdOf(todayStr())}-01" max="${todayStr()}"></div>
         <div class="field"><button class="btn primary" id="acAdd" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add bank account</button></div>
       </div>
       <div id="acMsg" style="font-size:13px;"></div>
     </div>
     <div class="section-head"><h2>Bank accounts</h2></div>
     <div class="card" style="margin-bottom:16px;"><div class="table-wrap"><table>
-      <thead><tr><th>Name</th><th>Bank</th><th>Account no.</th><th class="num">Balance</th><th>Status</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Bank</th><th>Account no.</th><th class="num">Opening</th><th class="num">Balance</th><th>Status</th><th></th></tr></thead>
       <tbody>${banks.length? banks.map(a=>`<tr>
         <td>${esc(a.name)}</td><td>${esc(a.bankName||'—')}</td><td>${esc(a.accountNo||'—')}</td>
+        <td class="num">${a.openingDate?`${money(a.openingBalance)}<div class="hint" style="font-size:11px;color:var(--text-faint)">as at ${fmtDateLabel(a.openingDate)}</div>`:'—'}</td>
         <td class="num" style="font-weight:600;">${money(a.balance||0)}</td>
         <td><span class="pill ${a.active!==false?'good':'neutral'}">${a.active!==false?'Active':'Inactive'}</span></td>
         <td>
           <button class="btn sm" data-deposit="${a.id}">Add deposit</button>
+          <button class="btn ghost sm" data-opening="${a.id}" style="margin-left:6px;">Opening balance</button>
           <button class="btn ghost sm" data-ledger="${a.id}" style="margin-left:6px;">Ledger</button>
           <button class="btn ghost sm" data-edit="${a.id}" style="margin-left:6px;">${icon('edit')}</button>
           <button class="btn ghost sm" data-toggle="${a.id}" data-cur="${a.active!==false}" style="margin-left:6px;">${a.active!==false?'Deactivate':'Activate'}</button>
           ${a.active===false?`<button class="btn danger sm" data-delete="${a.id}" style="margin-left:6px;">${icon('trash')}</button>`:''}
         </td>
-      </tr>`).join('') : `<tr><td colspan="6" class="empty">No bank accounts yet.</td></tr>`}</tbody>
+      </tr>`).join('') : `<tr><td colspan="7" class="empty">No bank accounts yet.</td></tr>`}</tbody>
     </table></div></div>
     <div class="section-head"><h2>Receivables</h2><span class="hint">money owed to the station by settlement partners</span></div>
     <div class="card"><div class="table-wrap"><table>
@@ -4927,7 +4930,7 @@ function renderSetupAccounts(body){
     if (!name){ $('#acMsg').innerHTML = `<span style="color:var(--critical)">Name the account.</span>`; return; }
     await state.db.collection('accounts').add({
       name, kind:'bank', bankName:$('#acBank').value.trim(), accountNo:$('#acNo').value.trim(),
-      balance:num($('#acOpen').value), ledger:[], active:true, createdAt:new Date().toISOString(),
+      balance:num($('#acOpen').value), openingBalance:num($('#acOpen').value), openingDate:$('#acOpenDate').value||'', ledger:[], active:true, createdAt:new Date().toISOString(),
     });
     await logActivity({entity:'Account', entityLabel:name, action:'add'});
     renderSetup($('#viewMount'));
@@ -4943,6 +4946,10 @@ function renderSetupAccounts(body){
     await logActivity({entity:'Account', entityLabel:rec?rec.name:b.dataset.delete, action:'delete'});
     renderSetup($('#viewMount'));
   });
+  $$('[data-opening]', body).forEach(b=>b.onclick=()=>{
+    const a = state.accounts.find(x=>x.id===b.dataset.opening);
+    if (a) openAccountOpeningModal(a);
+  });
   $$('[data-deposit]', body).forEach(b=>b.onclick=()=>{
     const a = state.accounts.find(x=>x.id===b.dataset.deposit);
     if (a) openAccountTxnModal(a, 'deposit');
@@ -4953,6 +4960,70 @@ function renderSetupAccounts(body){
   });
 }
 
+
+// Setting an account's balance by hand is the usual way an opening figure gets entered, but that
+// field is the balance TODAY — type the 1st-of-month figure into it and every report's opening comes
+// out short by whatever has been posted since. This asks for the balance and the date it applies to,
+// then works the current balance out from the movements in between.
+async function accountMovementSince(accountKey, fromDate){
+  if (fromDate > todayStr()) return 0;
+  const r = await computeReport(fromDate, todayStr(), {});
+  return buildLedgerPostings(r).filter(p=>p.key===accountKey).reduce((s,p)=>s + p.dr - p.cr, 0);
+}
+function openAccountOpeningModal(account){
+  const root = $('#modalRoot');
+  if (!root) return;
+  const defDate = account.openingDate || (monthIdOf(todayStr())+'-01');
+  root.innerHTML = `<div class="modal-backdrop" id="mbDrop">
+    <div class="modal">
+      <h3>Opening balance — ${esc(account.name)}</h3>
+      <p style="font-size:13px;color:var(--text-muted);margin:0 0 14px;">Enter the balance as your bank statement showed it on a given date. The current balance is then worked out by adding everything recorded since, so reports open from the right figure.</p>
+      <div class="field"><label>Balance was</label><input type="number" step="0.01" id="obAmount" value="${account.openingBalance!=null?num(account.openingBalance):''}" placeholder="0.00"></div>
+      <div class="field"><label>As at (start of this day)</label><input type="date" id="obDate" value="${defDate}" max="${todayStr()}"></div>
+      <div class="card card-pad" style="background:var(--surface-2);margin-bottom:12px;">
+        <div class="row" style="justify-content:space-between;font-size:13px;"><span>Recorded since that date</span><strong class="mono" id="obMove">—</strong></div>
+        <div class="row" style="justify-content:space-between;font-size:13px;margin-top:4px;"><span>Balance today would become</span><strong class="mono" id="obNew">—</strong></div>
+        <div class="row" style="justify-content:space-between;font-size:12.5px;margin-top:4px;color:var(--text-muted);"><span>Balance today now</span><span class="mono">${money(account.balance)}</span></div>
+      </div>
+      <div id="obMsg" style="font-size:13px;color:var(--critical);"></div>
+      <div class="modal-actions">
+        <button class="btn" id="obCancel">Cancel</button>
+        <button class="btn primary" id="obSave">Set opening balance</button>
+      </div>
+    </div>
+  </div>`;
+  $('#obCancel').onclick = closeModal;
+  $('#mbDrop').addEventListener('click', (e)=>{ if (e.target.id==='mbDrop') closeModal(); });
+  let movement = 0;
+  const recalc = async ()=>{
+    const from = $('#obDate').value;
+    if (!from) return;
+    $('#obMove').textContent = 'calculating…';
+    movement = await accountMovementSince('acct:'+account.id, from);
+    $('#obMove').textContent = money(movement);
+    $('#obNew').textContent = money(num($('#obAmount').value) + movement);
+  };
+  $('#obDate').onchange = recalc;
+  $('#obAmount').oninput = ()=>{ $('#obNew').textContent = money(num($('#obAmount').value) + movement); };
+  recalc();
+  $('#obSave').onclick = async ()=>{
+    if (!state.dbReady){ $('#obMsg').textContent = "Live data isn't connected."; return; }
+    const from = $('#obDate').value;
+    if (!from){ $('#obMsg').textContent = 'Pick the date this balance applies to.'; return; }
+    const opening = num($('#obAmount').value);
+    $('#obSave').disabled = true;
+    try{
+      movement = await accountMovementSince('acct:'+account.id, from);
+      const balance = opening + movement;
+      await state.db.doc('accounts/'+account.id).update({openingBalance:opening, openingDate:from, balance});
+      await logActivity({entity:'Account', entityLabel:account.name, action:'edit',
+        changes:[{field:'Opening balance', from:money(account.openingBalance), to:`${money(opening)} as at ${fmtDateLabel(from)}`},
+                 {field:'Balance today', from:money(account.balance), to:money(balance)}]});
+      closeModal();
+      renderSetup($('#viewMount'));
+    }catch(e){ $('#obMsg').textContent = 'Could not save: '+(e.message||'error'); $('#obSave').disabled = false; }
+  };
+}
 function openAccountTxnModal(account, mode){
   const root = $('#modalRoot');
   if (!root) return;
