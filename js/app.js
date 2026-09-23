@@ -351,7 +351,7 @@ const state = {
   db: null,
   dbReady: false,
   config: { stationName:'Conztant Petroleum Retailers', products:{p1:'Petrol (MS)',p2:'Diesel (HSD)',p3:'Power / XP'} },
-  tanks: [], nozzles: [], staff: [], creditors: [], suppliers: [], accounts: [], ledgers: [],
+  tanks: [], nozzles: [], staff: [], creditors: [], suppliers: [], accounts: [], ledgers: [], oilProducts: [],
   users: [], usersLoaded: false, currentUser: null,
   ratesFlat: {},        // 'YYYY-MM-DD' -> {p1,r2,p3}
   ratesLoadedMonths: new Set(),
@@ -427,6 +427,11 @@ function subscribeMasters(){
 
   db.collection('accounts').onSnapshot(qs=>{
     state.accounts = qs.docs.map(d=>Object.assign({id:d.id}, d.data()));
+    refreshView();
+  }, ()=>{});
+
+  db.collection('oilProducts').onSnapshot(qs=>{
+    state.oilProducts = qs.docs.map(d=>Object.assign({id:d.id}, d.data()));
     refreshView();
   }, ()=>{});
 
@@ -914,7 +919,7 @@ async function editDuty(date, dutyId){
     bankAccountId:(d.pay&&d.pay.bankAccountId)||'',
     creditSales:(d.creditSales||[]).map(c=>Object.assign({},c)),
     expenses:(d.expenses||[]).map(e=>Object.assign({},e)),
-    oils:(d.oils||[]).map(o=>Object.assign({},o)),
+    oils:(d.oils||[]).map(o=>Object.assign({}, o, {savedQty:num(o.qty)})),
     cashCount: Object.assign({}, d.cashCount||{}), _amount:(d.fuelAmount!=null?d.fuelAmount:d.dutyAmount)||0, _liters:d.dutyLiters||0,
   };
   renderCurrentView();
@@ -1010,7 +1015,7 @@ function renderDutyForm(mount){
   updateNozzleHint();
   $('#dfAddCredit').onclick = ()=>{ dutyForm.creditSales.push({id:uid(), creditorId:'', creditorName:'', amount:0, liters:0, indentNo:'', vehicleNo:''}); renderCreditRows(); };
   $('#dfAddExpense').onclick = ()=>{ dutyForm.expenses.push({id:uid(), category:EXPENSE_CATEGORIES[0], description:'', amount:0}); renderDutyExpenseRows(); };
-  $('#dfAddOil').onclick = ()=>{ dutyForm.oils.push({id:uid(), name:'', amount:0}); renderOilRows(); };
+  $('#dfAddOil').onclick = ()=>{ dutyForm.oils.push({id:uid(), productId:'', name:'', qty:0, rate:0, amount:0, savedQty:0}); renderOilRows(); };
   $('#dfSave').onclick = saveDutyEntry;
 
   renderDutyRows();
@@ -1026,23 +1031,55 @@ function renderDutyForm(mount){
 function renderOilRows(){
   const el = $('#dfOilRows'); if(!el) return;
   dutyForm.oils = dutyForm.oils || [];
-  if (!dutyForm.oils.length){ el.innerHTML = `<div class="hint" style="color:var(--text-faint);font-size:12.5px;">No oil sales added.</div>`; recomputeDutyTotals(); return; }
-  el.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Oil / product name</th><th class="num">Amount (₹)</th><th></th></tr></thead><tbody id="dfOilTbody"></tbody></table></div>`;
+  const products = state.oilProducts.filter(p=>p.active!==false);
+  if (!dutyForm.oils.length){
+    el.innerHTML = products.length
+      ? `<div class="hint" style="color:var(--text-faint);font-size:12.5px;">No oil sales added.</div>`
+      : `<div class="hint" style="color:var(--text-faint);font-size:12.5px;">No oil products set up yet — add them under <strong>Purchase → Oil &amp; lubricants</strong> to sell them here.</div>`;
+    recomputeDutyTotals(); return;
+  }
+  el.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Product</th><th class="num">Qty</th><th class="num">Rate (₹)</th><th class="num">Amount (₹)</th><th>Stock</th><th></th></tr></thead><tbody id="dfOilTbody"></tbody></table></div>
+    <div class="hint" style="color:var(--text-faint);font-size:12px;margin-top:6px;">Selling rate fills in from the product; change it here if you sold at a different price. Saving the duty reduces that product's stock by the quantity sold.</div>`;
   const tbody = $('#dfOilTbody');
   dutyForm.oils.forEach(o=>{
     const tr = document.createElement('tr'); tr.dataset.id = o.id;
-    tr.innerHTML = `<td><input type="text" class="oName" value="${esc(o.name||'')}" placeholder="e.g. Servo 4T 1L" style="width:200px;"></td>
+    tr.innerHTML = `<td><select class="oSel" style="width:190px;"><option value="">Select product…</option>${products.map(p=>`<option value="${p.id}" ${p.id===o.productId?'selected':''}>${esc(p.name)}</option>`).join('')}</select></td>
+      <td class="num"><input type="number" step="0.01" class="oQty" value="${o.qty||''}" placeholder="0" style="width:75px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="oRate" value="${o.rate||''}" placeholder="0.00" style="width:90px;text-align:right;"></td>
       <td class="num"><input type="number" step="0.01" class="oAmt" value="${o.amount||0}" style="width:100px;text-align:right;"></td>
+      <td class="oStock hint" style="font-size:11.5px;color:var(--text-faint);white-space:nowrap;"></td>
       <td><button class="btn ghost sm oRemove">${icon('trash')}</button></td>`;
     tbody.appendChild(tr);
-    const sync = ()=>{
-      o.name = tr.querySelector('.oName').value;
-      o.amount = num(tr.querySelector('.oAmt').value);
+    const sel = tr.querySelector('.oSel'), qtyEl = tr.querySelector('.oQty'), rateEl = tr.querySelector('.oRate'), amtEl = tr.querySelector('.oAmt'), stockEl = tr.querySelector('.oStock');
+    // Stock left after this sale, counting what this duty already had saved for the product, so an
+    // edit doesn't read as if the earlier quantity were being sold twice.
+    const showStock = ()=>{
+      const p = state.oilProducts.find(x=>x.id===o.productId);
+      if (!p){ stockEl.textContent = ''; return; }
+      const already = num(o.savedQty);
+      const left = num(p.stockQty) + already - num(o.qty);
+      stockEl.innerHTML = `${numFmt(left)} ${esc(p.unit||'')} left` + (left<0 ? ` <span class="pill critical">short</span>` : '');
+    };
+    const sync = (fromQtyOrRate)=>{
+      o.productId = sel.value;
+      o.name = oilProductName(sel.value, o.name);
+      o.qty = num(qtyEl.value);
+      o.rate = num(rateEl.value);
+      if (fromQtyOrRate) { o.amount = o.qty * o.rate; amtEl.value = o.amount ? Math.round(o.amount*100)/100 : 0; }
+      else o.amount = num(amtEl.value);
+      showStock();
       recomputeDutyTotals();
     };
-    tr.querySelector('.oName').addEventListener('input', sync);
-    tr.querySelector('.oAmt').addEventListener('input', sync);
+    sel.addEventListener('change', ()=>{
+      const p = state.oilProducts.find(x=>x.id===sel.value);
+      if (p && num(p.saleRate)) rateEl.value = p.saleRate;
+      sync(true);
+    });
+    qtyEl.addEventListener('input', ()=>sync(true));
+    rateEl.addEventListener('input', ()=>sync(true));
+    amtEl.addEventListener('input', ()=>sync(false));
     tr.querySelector('.oRemove').onclick = ()=>{ dutyForm.oils = dutyForm.oils.filter(x=>x.id!==o.id); renderOilRows(); };
+    showStock();
   });
   recomputeDutyTotals();
 }
@@ -1302,7 +1339,8 @@ async function saveDutyEntry(){
       pay:{pos:dutyForm.pos||0, upi:dutyForm.upi||0, hpCard:dutyForm.hpCard||0, bankAccountId:dutyForm.bankAccountId||''},
       creditSales: dutyForm.creditSales.filter(c=>num(c.amount)>0 || num(c.liters)>0),
       expenses: dutyForm.expenses.filter(e=>num(e.amount)>0),
-      oils: (dutyForm.oils||[]).filter(o=>num(o.amount)>0 || (o.name||'').trim()),
+      oils: (dutyForm.oils||[]).filter(o=>num(o.amount)>0 || num(o.qty)>0)
+        .map(o=>({id:o.id, productId:o.productId||'', name:o.name||'', qty:num(o.qty), rate:num(o.rate), amount:num(o.amount)})),
       cashCount: dutyForm.cashCount,
     });
     dutyForm = null;
@@ -1411,6 +1449,15 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
     if (Object.keys(patch).length) await state.db.doc('creditors/'+cid).update(patch).catch(()=>{});
   }
 
+  // Oil sold on this duty comes out of that product's stock — only the CHANGE since this duty's
+  // last save, so re-saving an edit never double-deducts, and switching product moves the deduction.
+  const oilQtyBy = (arr)=>{ const m={}; (arr||[]).forEach(o=>{ if (o.productId) m[o.productId] = (m[o.productId]||0) + num(o.qty); }); return m; };
+  const oldOilQty = oilQtyBy((prev && prev.oils) || []), newOilQty = oilQtyBy(oils);
+  for (const pid of new Set([...Object.keys(oldOilQty), ...Object.keys(newOilQty)])){
+    const delta = (newOilQty[pid]||0) - (oldOilQty[pid]||0);
+    if (delta) await adjustOilStock(pid, -delta);
+  }
+
   // Expenses paid out of the till on this duty mirror into the Expenses monthly ledger, so they
   // show up in that report and in the P&L — re-saving an edited duty replaces its own set of lines.
   await syncDutyExpenses(date, id, expenses||[]);
@@ -1513,6 +1560,7 @@ async function deleteDuty(date, dutyId){
     if (Object.keys(patch).length) await state.db.doc('creditors/'+cid).update(patch).catch(()=>{});
   }
   await syncDutyExpenses(date, dutyId, []);
+  for (const o of (d.oils||[])) if (o.productId && num(o.qty)) await adjustOilStock(o.productId, num(o.qty));
   const pay = d.pay || {};
   const bankAmt = num(pay.pos) + num(pay.upi);
   if (pay.bankAccountId && bankAmt){
@@ -1630,6 +1678,8 @@ function renderPurchase(mount){
     <div class="section-head"><h2>Purchases</h2><span id="stockMonthLabel"></span></div>
     <div id="stockList"></div>
 
+    ${renderOilSection()}
+
     <div class="section-head"><h2>Suppliers</h2><span class="hint">outstanding balances, live</span></div>
     <div class="card card-pad" style="margin-bottom:16px;">
       <div class="form-grid">
@@ -1675,6 +1725,7 @@ function renderPurchase(mount){
     if ($('#exAmt')) $('#exAmt').focus();
   });
   loadStockReceiptsList();
+  wireOilSection();
 }
 
 // Shared by the Purchase tab and Setup → Suppliers. A supplier still owed money is worth a second
@@ -1692,6 +1743,217 @@ async function deleteSupplier(id, after){
   await state.db.doc('suppliers/'+id).delete();
   await logActivity({entity:'Supplier', entityLabel:s.name, action:'delete', summary: owed?`Deleted with ${money(owed)} outstanding`:''});
   if (after) after();
+}
+
+/* ============================== OIL & LUBRICANT STOCK ============================== */
+// Lubricants are counted in units (litre packs, pieces) rather than tank litres, so they get their
+// own product master with a running stock quantity. Purchases add to that stock; oil lines on a
+// duty subtract from it. Oil purchases live in oilPurchasesMonthly and settle against a supplier
+// or cash/bank exactly like a fuel purchase.
+const OIL_UNITS = ['L','ml','pc','box'];
+function oilProductName(id, fallback){ const p = state.oilProducts.find(x=>x.id===id); return p ? p.name : (fallback||'—'); }
+async function adjustOilStock(productId, delta){
+  if (!productId || !delta) return;
+  const p = state.oilProducts.find(x=>x.id===productId);
+  if (!p) return;
+  await state.db.doc('oilProducts/'+productId).update({stockQty: num(p.stockQty) + delta}).catch(()=>{});
+  p.stockQty = num(p.stockQty) + delta;
+}
+async function applyOilPurchase(item, sign){
+  const qty = num(item.qty) * sign, amt = num(item.amount) * sign;
+  if (qty) await adjustOilStock(item.productId, qty);
+  if (!amt) return;
+  const meta = {date:item.date, narration:`Oil purchase — ${oilProductName(item.productId, item.productName)}`, journalId:item.id};
+  const payFrom = item.payFrom || 'credit';
+  if (payFrom==='credit'){ if (item.supplierId) await applyPosting('sup:'+item.supplierId, -amt, meta); }
+  else await applyPosting(payFrom, -amt, meta);
+}
+
+function renderOilSection(){
+  const products = state.oilProducts.slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  const stockValue = products.reduce((s,p)=>s+num(p.stockQty)*num(p.costRate),0);
+  return `
+    <div class="section-head"><h2>Oil &amp; lubricants</h2><span class="hint">stock value ${money(stockValue)}</span></div>
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <h3 style="margin:0 0 10px;font-size:14px;">Add stock (purchase)</h3>
+      <div class="form-grid">
+        <div class="field"><label>Date</label><input type="date" id="opDate" value="${todayStr()}" max="${todayStr()}"></div>
+        <div class="field"><label>Product</label><select id="opProduct"><option value="">Select product…</option>${products.filter(p=>p.active!==false).map(p=>`<option value="${p.id}">${esc(p.name)} — ${numFmt(p.stockQty)} ${esc(p.unit||'')} in stock</option>`).join('')}</select></div>
+        <div class="field"><label>Quantity</label><input type="number" step="0.01" id="opQty" placeholder="0"></div>
+        <div class="field"><label>Rate (₹ per unit)</label><input type="number" step="0.01" id="opRate" placeholder="0.00"></div>
+        <div class="field"><label>Total</label><input type="text" id="opTotal" value="₹0" disabled></div>
+        <div class="field"><label>Supplier</label><select id="opSupplier"><option value="">—</option>${state.suppliers.filter(s=>s.active!==false).map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div>
+        <div class="field"><label>Payment</label><select id="opPay">${purchasePayOptions('credit')}</select></div>
+        <div class="field"><label>Invoice ref</label><input type="text" id="opRef" placeholder="Optional"></div>
+        <div class="field"><button class="btn primary" id="opSave" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add oil stock</button></div>
+      </div>
+      <div id="opMsg" style="font-size:13px;margin-top:4px;"></div>
+    </div>
+
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <h3 style="margin:0 0 10px;font-size:14px;">Oil products</h3>
+      <div class="form-grid">
+        <div class="field"><label>Product name</label><input type="text" id="oilName" placeholder="e.g. Servo 4T 20W-40 1L"></div>
+        <div class="field"><label>Unit</label><select id="oilUnit">${OIL_UNITS.map(u=>`<option>${u}</option>`).join('')}</select></div>
+        <div class="field"><label>Opening stock (qty)</label><input type="number" step="0.01" id="oilQty" placeholder="0"></div>
+        <div class="field"><label>Cost rate (₹)</label><input type="number" step="0.01" id="oilCost" placeholder="0.00"></div>
+        <div class="field"><label>Selling rate (₹)</label><input type="number" step="0.01" id="oilSale" placeholder="0.00"></div>
+        <div class="field"><button class="btn" id="oilAdd" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add product</button></div>
+      </div>
+      <div id="oilMsg" style="font-size:13px;"></div>
+    </div>
+    <div class="card" style="margin-bottom:16px;"><div class="table-wrap"><table>
+      <thead><tr><th>Product</th><th>Unit</th><th class="num">Stock</th><th class="num">Cost rate</th><th class="num">Selling rate</th><th class="num">Stock value</th><th>Status</th><th></th></tr></thead>
+      <tbody>${products.length? products.map(p=>`<tr>
+        <td>${esc(p.name)}</td><td>${esc(p.unit||'')}</td>
+        <td class="num" ${num(p.stockQty)<=0?'style="color:var(--critical);font-weight:600;"':''}>${numFmt(p.stockQty)}</td>
+        <td class="num">${money(p.costRate)}</td><td class="num">${money(p.saleRate)}</td>
+        <td class="num">${money(num(p.stockQty)*num(p.costRate))}</td>
+        <td><span class="pill ${p.active!==false?'good':'neutral'}">${p.active!==false?'Active':'Inactive'}</span></td>
+        <td style="white-space:nowrap;"><button class="btn ghost sm" data-oedit="${p.id}">${icon('edit')}</button> <button class="btn ghost sm" data-otoggle="${p.id}" data-cur="${p.active!==false}">${p.active!==false?'Deactivate':'Activate'}</button>${p.active===false?` <button class="btn danger sm" data-odel="${p.id}">${icon('trash')}</button>`:''}</td>
+      </tr>`).join('') : `<tr><td colspan="8" class="empty">No oil products yet — add one above, then its stock can be bought and sold.</td></tr>`}</tbody>
+      ${products.length?`<tfoot><tr><td colspan="5" style="font-weight:700;">Total stock value</td><td class="num" style="font-weight:700;">${money(stockValue)}</td><td colspan="2"></td></tr></tfoot>`:''}
+    </table></div></div>
+
+    <div class="section-head"><h2>Oil purchases</h2><span id="oilMonthLabel"></span></div>
+    <div id="oilPurchaseList"></div>
+  `;
+}
+
+function wireOilSection(){
+  const upd = ()=>{ const t=$('#opTotal'); if (t) t.value = money(num($('#opQty').value)*num($('#opRate').value)); };
+  $('#opQty').oninput = upd; $('#opRate').oninput = upd;
+  $('#opProduct').onchange = ()=>{
+    const p = state.oilProducts.find(x=>x.id===$('#opProduct').value);
+    if (p && num(p.costRate) && !num($('#opRate').value)){ $('#opRate').value = p.costRate; upd(); }
+  };
+  $('#opSave').onclick = addOilPurchase;
+  $('#oilAdd').onclick = addOilProduct;
+  $$('#viewMount [data-oedit]').forEach(b=>b.onclick=()=>openSetupEditModal('oilProducts', b.dataset.oedit));
+  $$('#viewMount [data-otoggle]').forEach(b=>b.onclick=async ()=>{ await state.db.doc('oilProducts/'+b.dataset.otoggle).update({active: b.dataset.cur!=='true'}); });
+  $$('#viewMount [data-odel]').forEach(b=>b.onclick=async ()=>{
+    const p = state.oilProducts.find(x=>x.id===b.dataset.odel);
+    if (!p) return;
+    const ok = await confirmModal({title:`Delete ${p.name}?`, body: num(p.stockQty) ? `This product still shows <strong>${numFmt(p.stockQty)} ${esc(p.unit||'')}</strong> in stock. Deleting it removes that stock from your books. Past sales and purchases keep their saved product name.` : 'This permanently removes the product. Past sales and purchases keep their saved product name.', confirmLabel:'Delete product'});
+    if (!ok) return;
+    await state.db.doc('oilProducts/'+p.id).delete();
+    await logActivity({entity:'Oil product', entityLabel:p.name, action:'delete'});
+    renderPurchase($('#viewMount'));
+  });
+  loadOilPurchaseList();
+}
+
+async function addOilProduct(){
+  const msg = $('#oilMsg');
+  const name = $('#oilName').value.trim();
+  if (!state.dbReady){ msg.innerHTML = `<span style="color:var(--critical)">Live data isn't connected.</span>`; return; }
+  if (!name){ msg.innerHTML = `<span style="color:var(--critical)">Name the product.</span>`; return; }
+  if (state.oilProducts.some(p=>String(p.name||'').toLowerCase()===name.toLowerCase())){ msg.innerHTML = `<span style="color:var(--critical)">A product with that name already exists.</span>`; return; }
+  const qty = num($('#oilQty').value);
+  await state.db.collection('oilProducts').add({
+    name, unit:$('#oilUnit').value, stockQty:qty, openingQty:qty,
+    costRate:num($('#oilCost').value), saleRate:num($('#oilSale').value),
+    active:true, createdAt:new Date().toISOString(),
+  });
+  await logActivity({entity:'Oil product', entityLabel:name, action:'add', summary: qty?`Opening stock ${numFmt(qty)}`:''});
+  renderPurchase($('#viewMount'));
+}
+
+async function addOilPurchase(){
+  const msg = $('#opMsg');
+  const productId = $('#opProduct').value, qty = num($('#opQty').value), rate = num($('#opRate').value);
+  if (!state.dbReady){ msg.innerHTML = `<span style="color:var(--critical)">Live data isn't connected.</span>`; return; }
+  if (!productId){ msg.innerHTML = `<span style="color:var(--critical)">Select the oil product.</span>`; return; }
+  if (!(qty>0)){ msg.innerHTML = `<span style="color:var(--critical)">Enter the quantity.</span>`; return; }
+  $('#opSave').disabled = true;
+  try{
+    const date = $('#opDate').value;
+    const item = {id:uid(), date, productId, productName:oilProductName(productId), qty, rate, amount:qty*rate,
+      supplierId:$('#opSupplier').value, supplier:supplierName($('#opSupplier').value,''), payFrom:$('#opPay').value,
+      ref:$('#opRef').value.trim(), by: state.currentUser?state.currentUser.name:''};
+    const monthId = monthIdOf(date);
+    const data = (await getMonthDoc('oilPurchasesMonthly', monthId)) || {items:[]};
+    data.items = (data.items||[]).concat([item]);
+    data.totalAmount = data.items.reduce((s,i)=>s+num(i.amount),0);
+    await setMonthDoc('oilPurchasesMonthly', monthId, data);
+    await applyOilPurchase(item, +1);
+    // Keep the product's cost rate current so stock valuation uses what was last paid.
+    if (rate) await state.db.doc('oilProducts/'+productId).update({costRate:rate}).catch(()=>{});
+    await logActivity({entity:'Oil purchase', entityLabel:item.productName, action:'add', summary:`Added ${numFmt(qty)} for ${money(item.amount)}`});
+    renderPurchase($('#viewMount'));
+  }catch(e){ msg.innerHTML = `<span style="color:var(--critical)">Couldn't save: ${esc(e.message||'error')}</span>`; const b=$('#opSave'); if (b) b.disabled=false; }
+}
+
+function oilPurchaseEditFields(){
+  return [
+    {key:'date', label:'Date', type:'date'},
+    {key:'productId', label:'Product', type:'select', options:state.oilProducts.map(p=>({value:p.id,label:p.name})), fmt:v=>oilProductName(v)},
+    {key:'qty', label:'Quantity', type:'number', fmt:v=>numFmt(v)},
+    {key:'rate', label:'Rate (₹)', type:'number', fmt:v=>money(v)},
+    {key:'supplierId', label:'Supplier', type:'select', options:[{value:'',label:'—'}].concat(state.suppliers.map(s=>({value:s.id,label:s.name}))), fmt:v=>v?supplierName(v):'—'},
+    {key:'payFrom', label:'Payment', type:'select', options:[{value:'credit',label:'On credit (supplier due)'},{value:'cash',label:'Paid — Cash in hand'}].concat(state.accounts.filter(a=>a.kind==='bank').map(a=>({value:'acct:'+a.id,label:'Paid — '+a.name}))), fmt:v=>purchasePayLabel(v)},
+    {key:'ref', label:'Invoice ref', type:'text'},
+  ];
+}
+function editOilPurchase(monthId, item){
+  const fields = oilPurchaseEditFields();
+  openLineEditModal({
+    title:'Edit oil purchase', fields, values:Object.assign({payFrom:'credit'}, item),
+    onSave: async (out)=>{
+      if (!state.dbReady) throw new Error("Live data isn't connected.");
+      if (!(num(out.qty)>0)) throw new Error('Enter the quantity.');
+      const changes = diffFields(fields, item, out);
+      const newItem = Object.assign({}, item, out, {id:item.id, amount:num(out.qty)*num(out.rate), productName:oilProductName(out.productId), supplier:out.supplierId?supplierName(out.supplierId):''});
+      const newMonth = monthIdOf(out.date);
+      await applyOilPurchase(item, -1);
+      const oldData = await getMonthDoc('oilPurchasesMonthly', monthId);
+      if (oldData){ oldData.items = (oldData.items||[]).filter(i=>i.id!==item.id); oldData.totalAmount = oldData.items.reduce((s,i)=>s+num(i.amount),0); await setMonthDoc('oilPurchasesMonthly', monthId, oldData); }
+      const newData = (newMonth===monthId && oldData) ? oldData : ((await getMonthDoc('oilPurchasesMonthly', newMonth)) || {items:[]});
+      newData.items = (newData.items||[]).concat([newItem]);
+      newData.totalAmount = newData.items.reduce((s,i)=>s+num(i.amount),0);
+      await setMonthDoc('oilPurchasesMonthly', newMonth, newData);
+      await applyOilPurchase(newItem, +1);
+      if (changes.length) await logActivity({entity:'Oil purchase', entityLabel:newItem.productName, action:'edit', changes});
+      renderPurchase($('#viewMount'));
+    }
+  });
+}
+async function removeOilPurchase(monthId, item){
+  const ok = await confirmModal({title:'Delete this oil purchase?', body:'This removes it, takes the quantity back out of stock and reverses the supplier or cash / bank effect.', confirmLabel:'Delete purchase'});
+  if (!ok) return;
+  const data = await getMonthDoc('oilPurchasesMonthly', monthId);
+  if (!data) return;
+  data.items = (data.items||[]).filter(i=>i.id!==item.id);
+  data.totalAmount = data.items.reduce((s,i)=>s+num(i.amount),0);
+  await setMonthDoc('oilPurchasesMonthly', monthId, data);
+  await applyOilPurchase(item, -1);
+  await logActivity({entity:'Oil purchase', entityLabel:item.productName||'', action:'delete', summary:`Removed ${numFmt(item.qty)}`});
+  renderPurchase($('#viewMount'));
+}
+
+async function loadOilPurchaseList(){
+  const el = $('#oilPurchaseList'); if(!el) return;
+  el.innerHTML = `<div class="card empty">Loading…</div>`;
+  const monthId = state.activeMonth;
+  $('#oilMonthLabel') && ($('#oilMonthLabel').innerHTML = monthSwitcherHtml());
+  const data = await getMonthDoc('oilPurchasesMonthly', monthId);
+  const items = ((data&&data.items)||[]).slice().sort((a,b)=>b.date.localeCompare(a.date));
+  el.innerHTML = `<div class="card"><div class="table-wrap"><table>
+    <thead><tr><th>Date</th><th>Product</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Total</th><th>Supplier</th><th>Payment</th><th>Ref</th><th></th></tr></thead>
+    <tbody>${items.length? items.map(it=>`<tr>
+      <td style="white-space:nowrap;">${fmtDateLabel(it.date)}</td>
+      <td>${esc(oilProductName(it.productId, it.productName))}</td>
+      <td class="num">${numFmt(it.qty)}</td><td class="num">${money(it.rate)}</td><td class="num">${money(it.amount)}</td>
+      <td>${esc(it.supplierId?supplierName(it.supplierId, it.supplier):'—')}</td>
+      <td><span class="pill ${(!it.payFrom||it.payFrom==='credit')?'warning':'good'}">${esc(purchasePayLabel(it.payFrom))}</span></td>
+      <td>${esc(it.ref||'—')}</td>
+      <td style="white-space:nowrap;"><button class="btn ghost sm" data-oped="${it.id}">${icon('edit')}</button> <button class="btn ghost sm" data-oprm="${it.id}">${icon('trash')}</button></td>
+    </tr>`).join('') : `<tr><td colspan="9" class="empty">No oil purchases for ${monthLabel(monthId)}.</td></tr>`}</tbody>
+    ${items.length?`<tfoot><tr><td colspan="4" style="font-weight:700;">Total</td><td class="num" style="font-weight:700;">${money(data.totalAmount)}</td><td colspan="4"></td></tr></tfoot>`:''}
+  </table></div></div>`;
+  $$('#oilPurchaseList [data-oped]').forEach(b=>b.onclick=()=>{ const it = items.find(x=>x.id===b.dataset.oped); if (it) editOilPurchase(monthId, it); });
+  $$('#oilPurchaseList [data-oprm]').forEach(b=>b.onclick=()=>{ const it = items.find(x=>x.id===b.dataset.oprm); if (it) removeOilPurchase(monthId, it); });
+  wireMonthSwitcher(()=>{ loadOilPurchaseList(); });
 }
 
 async function addSupplierFromPurchase(){
@@ -2383,7 +2645,10 @@ async function computeReport(from, to, f){
   r.expenseTotal = r.expenses.reduce((s,i)=>s+num(i.amount),0);
   const pl = journalPL({items:r.journal}, {items:r.receipts}, {items:r.payments});
   r.otherIncome = pl.income; r.otherExpense = pl.expense;
-  r.grossMargin = r.revenue - r.fuelCost;
+  // Oils are costed as goods sold (qty × the product's cost rate), unlike fuel where the period's
+  // purchases stand in for cost — lubricant stock turns over slowly, so purchases would distort it.
+  r.oilCost = r.oils.reduce((s,o)=>{ const p = state.oilProducts.find(x=>x.id===o.productId); return s + num(o.qty)*num(p&&p.costRate); }, 0);
+  r.grossMargin = r.revenue - r.fuelCost - r.oilCost;
   r.net = r.grossMargin - r.expenseTotal - r.salary + r.otherIncome - r.otherExpense;
   return r;
 }
@@ -2498,8 +2763,13 @@ function stockValuation(rates){
     return {id:c.id, name:c.name, product:c.bowserProduct, qty, rate, value:qty*rate, bowser:true};
   });
   const rows = tanks.concat(bowsers);
+  // Lubricants carry their own cost rate on the product record.
+  const oils = state.oilProducts.filter(p=>p.active!==false).map(p=>({
+    id:p.id, name:p.name, unit:p.unit||'', qty:num(p.stockQty), rate:num(p.costRate), value:num(p.stockQty)*num(p.costRate), saleRate:num(p.saleRate),
+  }));
   return {rows, totalQty:rows.reduce((s,x)=>s+x.qty,0), totalValue:rows.reduce((s,x)=>s+x.value,0),
-          tankQty:tanks.reduce((s,x)=>s+x.qty,0), tankValue:tanks.reduce((s,x)=>s+x.value,0)};
+          tankQty:tanks.reduce((s,x)=>s+x.qty,0), tankValue:tanks.reduce((s,x)=>s+x.value,0),
+          oils, oilValue:oils.reduce((s,x)=>s+x.value,0)};
 }
 
 function deltaPill(cur, prev, opts){
@@ -2630,6 +2900,7 @@ function renderReportBody(body, cfg, r, c){
     ${kpi('Fuel sales', r.fuelRevenue, P('fuelRevenue'), liters(r.liters))}
     ${kpi('Oil sales', r.oilRevenue, P('oilRevenue'), 'total takings '+moneyShort(r.revenue))}
     ${kpi('Fuel purchase cost', r.fuelCost, P('fuelCost'), 'from deliveries logged', {lowerIsBetter:true})}
+    ${kpi('Oil cost of sales', r.oilCost, P('oilCost'), 'qty sold × cost rate', {lowerIsBetter:true})}
     ${kpi('Gross margin', r.grossMargin, P('grossMargin'), '', {signColor:true})}
     ${kpi('Expenses', r.expenseTotal, P('expenseTotal'), '', {lowerIsBetter:true})}
     ${kpi('Salary', r.salary, P('salary'), '', {lowerIsBetter:true})}
@@ -2649,7 +2920,8 @@ function renderReportBody(body, cfg, r, c){
     receivables.forEach(a=>cards.push(`<div class="card kpi"><div class="label">${esc(a.name)}</div><div class="value">${moneyShort(a.balance)}</div><div class="foot">receivable</div></div>`));
     if (!banks.length) cards.push(`<div class="card kpi"><div class="label">Bank</div><div class="value">—</div><div class="foot">add one in Setup → Accounts</div></div>`);
     const sv = r.stockValue || {rows:[], totalQty:0, totalValue:0};
-    cards.push(`<div class="card kpi"><div class="label">Stock on hand</div><div class="value">${moneyShort(sv.totalValue)}</div><div class="foot">${liters(sv.totalQty)} at last purchase cost</div></div>`);
+    cards.push(`<div class="card kpi"><div class="label">Stock on hand</div><div class="value">${moneyShort(sv.totalValue)}</div><div class="foot">fuel ${liters(sv.totalQty)}</div></div>`);
+    cards.push(`<div class="card kpi"><div class="label">Oil & lubricant stock</div><div class="value">${moneyShort(sv.oilValue||0)}</div><div class="foot">${(sv.oils||[]).length} product(s)</div></div>`);
     const creditorDue = state.creditors.reduce((s,x)=>s+num(x.balance),0);
     const supplierDue = state.suppliers.reduce((s,x)=>s+num(x.balance),0);
     cards.push(`<div class="card kpi"><div class="label">Receivable from creditors</div><div class="value">${moneyShort(creditorDue)}</div><div class="foot">${state.creditors.filter(x=>num(x.balance)).length} with dues</div></div>`);
@@ -2661,6 +2933,9 @@ function renderReportBody(body, cfg, r, c){
         return [esc(x.name)+(x.bowser?' <span class="hint" style="color:var(--text-faint);">(bowser)</span>':''), esc(state.config.products[x.product]||x.product||'—'), liters(x.qty), x.rate?money(x.rate):'<span class="pill warning">no purchase rate</span>', money(x.value), src?fmtDateLabel(src.date):'—'];
       }),
       ['Total','', liters(sv.totalQty), '', money(sv.totalValue), '']));
+    parts.push(table('Oil &amp; lubricant stock', [{label:'Product'},{label:'Unit'},{label:'Quantity',num:true},{label:'Cost rate',num:true},{label:'Value',num:true},{label:'Selling rate',num:true}],
+      (sv.oils||[]).map(x=>[esc(x.name), esc(x.unit), numFmt(x.qty)+(num(x.qty)<=0?' <span class="pill critical">out of stock</span>':''), money(x.rate), money(x.value), money(x.saleRate)]),
+      ['Total','', '', '', money(sv.oilValue||0), '']));
   }
 
   if (has('products') || has('trend')) parts.push(`<div class="grid grid-2" style="margin-top:14px;">
@@ -2692,8 +2967,17 @@ function renderReportBody(body, cfg, r, c){
   }
   if (has('oils')){
     const rows = r.oils.slice().sort(sortD);
-    parts.push(table('Oil sales', [{label:'Date'},{label:'Staff'},{label:'Oil / product'},{label:'Amount',num:true}],
-      rows.map(o=>[fmtDateLabel(o.date), esc(o.staffName), esc(o.name||'—'), money(o.amount)]), ['Total','','', money(r.oilRevenue)]));
+    parts.push(table('Oil sales', [{label:'Date'},{label:'Staff'},{label:'Product'},{label:'Qty',num:true},{label:'Rate',num:true},{label:'Amount',num:true}],
+      rows.map(o=>[fmtDateLabel(o.date), esc(o.staffName), esc(oilProductName(o.productId, o.name)||'—'), o.qty?numFmt(o.qty):'—', o.rate?money(o.rate):'—', money(o.amount)]),
+      ['Total','','', numFmt(rows.reduce((s,o)=>s+num(o.qty),0)), '', money(r.oilRevenue)]));
+    // Per-product totals, so fast and slow movers are obvious.
+    const byProd = {};
+    rows.forEach(o=>{ const k = oilProductName(o.productId, o.name)||'—'; const m = byProd[k] = byProd[k]||{qty:0, amount:0}; m.qty += num(o.qty); m.amount += num(o.amount); });
+    parts.push(table('Oil sales by product', [{label:'Product'},{label:'Qty sold',num:true},{label:'Amount',num:true},{label:'Stock left',num:true}],
+      Object.entries(byProd).sort((a,b)=>b[1].amount-a[1].amount).map(([k,v])=>{
+        const p = state.oilProducts.find(x=>x.name===k);
+        return [esc(k), numFmt(v.qty), money(v.amount), p?`${numFmt(p.stockQty)} ${esc(p.unit||'')}`:'—'];
+      })));
   }
   if (has('purchases')){
     const rows = r.purchases.slice().sort(sortD);
@@ -2826,7 +3110,7 @@ function exportReportExcel(rep){
     if (has('summary')){
       rows.push(c ? ['Item', 'This period (₹)', `Previous (${rangeLabel(c.from,c.to)})`, 'Change'] : ['Item', 'Amount (₹)']);
       rows.push(line('Fuel sales','fuelRevenue'), line('Oil sales','oilRevenue'), line('Total takings','revenue'), line('Fuel liters sold','liters'),
-        line('Fuel purchase cost','fuelCost'), line('Gross margin','grossMargin'), line('Expenses','expenseTotal'), line('Salary','salary'),
+        line('Fuel purchase cost','fuelCost'), line('Oil cost of sales','oilCost'), line('Gross margin','grossMargin'), line('Expenses','expenseTotal'), line('Salary','salary'),
         line('Other income (journal + receipts)','otherIncome'), line('Other expenses (journal)','otherExpense'), line('Net P&L','net'), []);
     }
     if (has('collections') && r.payTotals){
@@ -2864,13 +3148,18 @@ function exportReportExcel(rep){
     ...r.nozzleRows.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(n=>[n.date, n.staffName, n.nozzle, state.config.products[n.product]||n.product||'', r2(n.opening), r2(n.closing), r2(n.testLiters), r2(n.transferLiters), r2(n.liters), r2(n.rate), r2(n.amount)]),
   ], [12, 18, 12, 14, 12, 12, 9, 11, 10, 9, 12]);
   if (has('credit')) addSheet('Credit sales', [['Date', 'Creditor', 'Staff', 'Indent No.', 'Vehicle No.', 'Liters', 'Amount (₹)'], ...r.creditSales.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(x=>[x.date, x.creditorName, x.staffName, x.indentNo||'', x.vehicleNo||'', r2(x.liters), r2(x.amount)])], [12, 22, 18, 12, 14, 10, 12]);
-  if (has('oils')) addSheet('Oil sales', [['Date', 'Staff', 'Oil / product', 'Amount (₹)'], ...r.oils.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(o=>[o.date, o.staffName, o.name||'', r2(o.amount)])], [12, 18, 26, 12]);
+  if (has('oils')) addSheet('Oil sales', [['Date', 'Staff', 'Product', 'Qty', 'Rate (₹)', 'Amount (₹)'], ...r.oils.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(o=>[o.date, o.staffName, oilProductName(o.productId, o.name), r2(o.qty), r2(o.rate), r2(o.amount)])], [12, 18, 26, 10, 12, 14]);
   if (has('purchases')) addSheet('Purchases', [['Date', 'Product', 'Tank', 'Supplier', 'Invoice / DO', 'Liters', 'Rate', 'Amount (₹)'], ...r.purchases.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, state.config.products[it.product]||it.product||'', it.tankName||'', it.supplier||'', it.ref||'', r2(it.liters), r2(it.rate), r2(it.amount)])], [12, 14, 12, 16, 14, 10, 9, 12]);
   if (has('expenses')) addSheet('Expenses', [['Date', 'Category', 'Description', 'Source', 'Amount (₹)'], ...r.expenses.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, it.category||'', it.description||'', it.source==='duty'?'Duty till':'Manual', r2(it.amount)])], [12, 22, 30, 10, 12]);
   if (has('payments')) addSheet('Payments', [['Date', 'Paid to', 'Payment for', 'Description', 'Mode', 'Paid from', 'Ledger', 'Amount (₹)'], ...r.payments.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, it.party||'', it.item||'', it.description||'', it.mode||'', paidFromLabel(it.paidFrom), targetLabel(it.ledger)||'', r2(it.amount)])], [12, 22, 20, 30, 12, 16, 22, 12]);
   if (has('salary')) addSheet('Salary', [['Month', 'Staff', 'Wage type', 'Hours', 'Base (₹)', 'Advance (₹)', 'Deduction (₹)', 'Net (₹)', 'Status', 'Paid date'], ...r.salaryRows.map(s=>[s.month, s.name, s.wageType||'monthly', s.hoursWorked!=null?r2(s.hoursWorked):'', r2(s.baseSalary), r2(s.advance), r2(s.deduction), r2(s.netPaid), s.status||'', s.paidDate||''])], [10, 18, 10, 8, 12, 12, 13, 12, 9, 12]);
   if (has('journal')) addSheet('Journal', [['Date', 'Debit (Dr)', 'Credit (Cr)', 'Amount (₹)', 'Narration', 'By'], ...r.journal.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, targetLabel(it.debit)||it.debitLabel||'', targetLabel(it.credit)||it.creditLabel||'', r2(it.amount), it.narration||'', it.by||''])], [12, 28, 28, 12, 36, 14]);
   if (has('receipts')) addSheet('Receipts', [['Date', 'From', 'Type', 'Amount (₹)', 'Into', 'Mode', 'Reference', 'Narration', 'Ledger', 'By'], ...r.receipts.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, receiptFromLabel(it), it.type==='creditor'?'Creditor':'Other', r2(it.amount), it.into==='cash'?'Cash in hand':((state.accounts.find(a=>'acct:'+a.id===it.into)||{}).name||''), it.mode||'', it.reference||'', it.narration||'', targetLabel(it.ledger)||'', it.by||''])], [12, 24, 10, 12, 18, 12, 14, 30, 22, 14]);
+  if (has('stock')) addSheet('Oil stock', [
+    ['Product', 'Unit', 'Quantity', 'Cost rate (₹)', 'Value (₹)', 'Selling rate (₹)'],
+    ...((r.stockValue&&r.stockValue.oils)||[]).map(x=>[x.name, x.unit, r2(x.qty), r2(x.rate), r2(x.value), r2(x.saleRate)]),
+    ['Total', '', '', '', r2((r.stockValue||{}).oilValue), ''],
+  ], [28, 10, 12, 14, 14, 16]);
   if (has('stock')) addSheet('Tank stock', [
     ['Tank', 'Product', 'Capacity (L)', 'Current stock (L)', 'Fill %'],
     ...state.tanks.map(t=>[t.name, state.config.products[t.product]||t.product||'', r2(t.capacityL), r2(t.currentStockL), num(t.capacityL)?Math.round((num(t.currentStockL)/num(t.capacityL))*100):'']),
@@ -3465,6 +3754,13 @@ const SETUP_ENTITY = {
     );
     return f;
   }},
+  oilProducts: { label:'Oil product', collection:'oilProducts', list:()=>state.oilProducts, fields:()=>[
+    {key:'name', label:'Product name', type:'text'},
+    {key:'unit', label:'Unit', type:'select', options:OIL_UNITS.map(u=>({value:u,label:u}))},
+    {key:'stockQty', label:'Stock quantity — manual correction', type:'number', fmt:v=>numFmt(v)},
+    {key:'costRate', label:'Cost rate (₹)', type:'number', fmt:v=>money(v)},
+    {key:'saleRate', label:'Selling rate (₹)', type:'number', fmt:v=>money(v)},
+  ]},
   suppliers: { label:'Supplier', collection:'suppliers', list:()=>state.suppliers, fields:()=>[
     {key:'balance', label:'Outstanding (₹) — manual correction', type:'number', fmt:v=>money(v)},
     {key:'name', label:'Name', type:'text'},
