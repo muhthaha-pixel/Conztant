@@ -2884,7 +2884,7 @@ function ledgerAccountList(){
   const out = [];
   const cash = state.ledgers.find(l=>l.cashInHand);
   if (cash) out.push({key:'cash', label:'Cash in hand', group:'cashbank', balance:num(cash.balance), balanceKind:'dr'});
-  state.accounts.filter(a=>a.kind==='bank').forEach(a=>out.push({key:'acct:'+a.id, label:a.name+' (Bank)', group:'cashbank', balance:num(a.balance), balanceKind:'dr'}));
+  state.accounts.filter(a=>a.kind==='bank').forEach(a=>out.push({key:'acct:'+a.id, label:a.name+' (Bank)', group:'cashbank', balance:num(a.balance), balanceKind:'dr', openingDate:a.openingDate||'', openingBalance:a.openingBalance}));
   state.accounts.filter(a=>a.kind==='receivable').forEach(a=>out.push({key:'acct:'+a.id, label:a.name, group:'creditors', balance:num(a.balance), balanceKind:'dr'}));
   state.ledgers.filter(l=>!l.cashInHand).forEach(l=>out.push({key:'led:'+l.id, label:l.name, group:l.group||'asset', balance:num(l.balance), balanceKind:'dr'}));
   state.creditors.forEach(c=>out.push({key:'cred:'+c.id, label:c.name+' (Creditor)', group:'creditors', balance:num(c.balance), balanceKind:'dr'}));
@@ -3593,11 +3593,12 @@ function renderReportBody(body, cfg, r, c){
           <div class="table-wrap"><table>
             <thead><tr><th>Date</th><th>Particulars</th><th>Ref</th><th class="num">Debit</th><th class="num">Credit</th><th class="num">Running</th></tr></thead>
             <tbody>
-              <tr><td colspan="3" style="font-style:italic;color:var(--text-muted);">Opening balance — ${esc(fmtDateLabel(r.from))}</td><td class="num">—</td><td class="num">—</td><td class="num">${ledgerBalanceLabel(a.opening)}</td></tr>
+              <tr><td colspan="3" style="font-style:italic;color:var(--text-muted);">Opening balance — ${esc(fmtDateLabel(r.from))}${a.openingDate && r.from < a.openingDate ? ` <span class="pill warning" title="This period starts before the balance you confirmed, so the opening is worked back from today rather than from a figure you verified">derived</span>` : ''}</td><td class="num">—</td><td class="num">—</td><td class="num">${ledgerBalanceLabel(a.opening)}</td></tr>
               ${rows.length? rows.map(row=>`<tr>${row.map((v,i)=>`<td class="${i>=3?'num':''}">${v}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="6" class="empty">No transactions in this period.</td></tr>`}
             </tbody>
             <tfoot><tr><td colspan="3" style="font-weight:700;">Closing balance</td><td class="num" style="font-weight:700;">${money(a.dr)}</td><td class="num" style="font-weight:700;">${money(a.cr)}</td><td class="num" style="font-weight:700;">${ledgerBalanceLabel(a.closing)}</td></tr></tfoot>
           </table></div>
+          ${a.openingDate && r.from < a.openingDate ? `<div class="hint" style="color:var(--warning);font-size:12px;margin-top:8px;">This period starts before ${esc(fmtDateLabel(a.openingDate))}, the date your confirmed balance of <strong>${money(a.openingBalance)}</strong> applies to. Anything that happened before your records begin is rolled into the opening figure above, so it will not match a bank statement. Run the report from ${esc(fmtDateLabel(a.openingDate))} for figures that tie out.</div>` : ''}
         </div>`);
       });
     });
