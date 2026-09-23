@@ -2598,7 +2598,7 @@ async function computeReport(from, to, f){
   const r = { from, to, days:daysBetween(from,to), revenue:0, fuelRevenue:0, oilRevenue:0, liters:0,
     byProduct:{p1:{liters:0,amount:0}, p2:{liters:0,amount:0}, p3:{liters:0,amount:0}}, byDay:{},
     payTotals: entryFiltered ? null : {pos:0, upi:0, hpCard:0, credit:0, cash:0, expenses:0},
-    duties:[], creditSales:[], oils:[], purchases:[], expenses:[], payments:[], salaryRows:[], salary:0, journal:[], receipts:[], nozzleRows:[] };
+    duties:[], creditSales:[], oils:[], purchases:[], oilPurchases:[], expenses:[], payments:[], salaryRows:[], salary:0, journal:[], receipts:[], nozzleRows:[] };
   dayDocs.forEach(doc=>{
     Object.entries(doc.duties||{}).forEach(([dutyId,x])=>{
       if (f.staff && x.staffId!==f.staff) return;
@@ -2629,6 +2629,8 @@ async function computeReport(from, to, f){
   for (const m of months){
     const st = await getMonthDoc('stockReceiptsMonthly', m);
     ((st&&st.items)||[]).forEach(it=>{ if (inRange(it.date) && (!productFilter || it.product===productFilter)) r.purchases.push(it); });
+    const op = await getMonthDoc('oilPurchasesMonthly', m);
+    ((op&&op.items)||[]).forEach(it=>{ if (inRange(it.date)) r.oilPurchases.push(it); });
     const ex = await getMonthDoc('expensesMonthly', m);
     ((ex&&ex.items)||[]).forEach(it=>{ if (!inRange(it.date)) return; if (expenseKind(it)==='payment') r.payments.push(it); else r.expenses.push(it); });
     const jn = await getMonthDoc('journalMonthly', m);
@@ -2640,16 +2642,24 @@ async function computeReport(from, to, f){
     if (sal && sal.staff){ Object.entries(sal.staff).forEach(([sid,s])=>{ if (!f.staff || sid===f.staff){ r.salaryRows.push(Object.assign({month:m}, s)); r.salary += num(s.netPaid); } }); }
   }
   r.fuelCost = r.purchases.reduce((s,i)=>s+num(i.amount),0);
+  r.oilPurchaseCost = r.oilPurchases.reduce((s,i)=>s+num(i.amount),0);
+  r.purchaseTotal = r.fuelCost + r.oilPurchaseCost;
   r.stockRates = await latestPurchaseRates(to);
   r.stockValue = stockValuation(r.stockRates);
   r.expenseTotal = r.expenses.reduce((s,i)=>s+num(i.amount),0);
   const pl = journalPL({items:r.journal}, {items:r.receipts}, {items:r.payments});
   r.otherIncome = pl.income; r.otherExpense = pl.expense;
-  // Oils are costed as goods sold (qty × the product's cost rate), unlike fuel where the period's
-  // purchases stand in for cost — lubricant stock turns over slowly, so purchases would distort it.
-  r.oilCost = r.oils.reduce((s,o)=>{ const p = state.oilProducts.find(x=>x.id===o.productId); return s + num(o.qty)*num(p&&p.costRate); }, 0);
-  r.grossMargin = r.revenue - r.fuelCost - r.oilCost;
-  r.net = r.grossMargin - r.expenseTotal - r.salary + r.otherIncome - r.otherExpense;
+
+  // Trading account:
+  //   Gross P&L = Sales + Closing stock − Opening stock − Purchases
+  //   Net P&L   = Gross P&L + Other income − Total expenses (expenses + salary + other expenses)
+  // Opening stock is the position at the end of the day before the period starts.
+  r.openingStock = await stockSnapshot(addDays(from, -1));
+  r.closingStock = await stockSnapshot(to);
+  r.stockChange = r.closingStock.totalValue - r.openingStock.totalValue;
+  r.grossMargin = r.revenue + r.closingStock.totalValue - r.openingStock.totalValue - r.purchaseTotal;
+  r.totalExpenses = r.expenseTotal + r.salary + r.otherExpense;
+  r.net = r.grossMargin + r.otherIncome - r.totalExpenses;
   return r;
 }
 
@@ -2735,10 +2745,13 @@ async function latestPurchaseRates(uptoDate){
   let cursor = monthIdOf(uptoDate);
   for (let i=0; i<24; i++){
     const data = await getMonthDoc('stockReceiptsMonthly', cursor);
+    // Months are scanned newest-first, so only a genuinely later purchase may replace what's held —
+    // otherwise an older month would overwrite the rate found in a newer one.
+    const keepLater = (map, key, it)=>{ if (!map[key] || it.date > map[key].date) map[key] = {rate:num(it.rate), date:it.date}; };
     ((data&&data.items)||[]).slice().sort((a,b)=>a.date.localeCompare(b.date)).forEach(it=>{
       if (it.date > uptoDate || !num(it.rate)) return;
-      if (it.tankId) byTank[it.tankId] = {rate:num(it.rate), date:it.date};
-      if (it.product) byProduct[it.product] = {rate:num(it.rate), date:it.date};
+      if (it.tankId) keepLater(byTank, it.tankId, it);
+      if (it.product) keepLater(byProduct, it.product, it);
     });
     cursor = shiftMonth(cursor, -1);
   }
@@ -2770,6 +2783,72 @@ function stockValuation(rates){
   return {rows, totalQty:rows.reduce((s,x)=>s+x.qty,0), totalValue:rows.reduce((s,x)=>s+x.value,0),
           tankQty:tanks.reduce((s,x)=>s+x.qty,0), tankValue:tanks.reduce((s,x)=>s+x.value,0),
           oils, oilValue:oils.reduce((s,x)=>s+x.value,0)};
+}
+
+// ---- stock as at a date (for opening / closing stock in the trading account) ---------------
+// Only live quantities are stored, so a past position is reconstructed by rolling those back over
+// every movement recorded AFTER the date: undo purchases received, undo transfers in, add back
+// what was dispensed or sold. Valued at the purchase rate ruling on that date.
+async function stockSnapshot(dateStr){
+  const tankBack = {}, oilBack = {}, bowserBack = {};   // movements strictly after dateStr
+  const startMonth = monthIdOf(dateStr), nowMonth = monthIdOf(todayStr());
+  let m = startMonth;
+  for (let i=0; i<=60 && m<=nowMonth; i++){
+    const fuel = await getMonthDoc('stockReceiptsMonthly', m);
+    ((fuel&&fuel.items)||[]).forEach(it=>{ if (it.date>dateStr && it.tankId) tankBack[it.tankId] = (tankBack[it.tankId]||0) + num(it.liters); });
+    const oilP = await getMonthDoc('oilPurchasesMonthly', m);
+    ((oilP&&oilP.items)||[]).forEach(it=>{ if (it.date>dateStr && it.productId) oilBack[it.productId] = (oilBack[it.productId]||0) + num(it.qty); });
+    (await getMonthDailyLogs(m)).forEach(doc=>{
+      if (!doc.date || doc.date<=dateStr) return;
+      Object.values(doc.duties||{}).forEach(d=>{
+        Object.values(d.nozzles||{}).forEach(n=>{
+          const draw = n.drawLiters!=null ? n.drawLiters : n.liters;
+          if (n.tankId) tankBack[n.tankId] = (tankBack[n.tankId]||0) - num(draw);            // dispensed → add back
+          if (n.transferToTankId) tankBack[n.transferToTankId] = (tankBack[n.transferToTankId]||0) + num(n.transferLiters);
+        });
+        (d.oils||[]).forEach(o=>{ if (o.productId) oilBack[o.productId] = (oilBack[o.productId]||0) - num(o.qty); });
+        (d.creditSales||[]).forEach(c=>{ if (c.creditorId && num(c.liters)) bowserBack[c.creditorId] = (bowserBack[c.creditorId]||0) + num(c.liters); });
+      });
+    });
+    m = shiftMonth(m, 1);
+  }
+  const rates = await latestPurchaseRates(dateStr);
+  const oilRates = await latestOilRates(dateStr);
+  const rows = [];
+  state.tanks.forEach(t=>{
+    const qty = num(t.currentStockL) - (tankBack[t.id]||0);
+    const rate = valuationRate(rates, t.id, t.product);
+    rows.push({kind:'tank', id:t.id, name:t.name, product:t.product, qty, rate, value:qty*rate});
+  });
+  state.creditors.filter(c=>c.isBowser).forEach(c=>{
+    const qty = num(c.bowserStockL) - (bowserBack[c.id]||0);
+    const rate = valuationRate(rates, null, c.bowserProduct);
+    rows.push({kind:'bowser', id:c.id, name:c.name, product:c.bowserProduct, qty, rate, value:qty*rate});
+  });
+  state.oilProducts.forEach(p=>{
+    const qty = num(p.stockQty) - (oilBack[p.id]||0);
+    const rate = oilRates[p.id]!=null ? oilRates[p.id] : num(p.costRate);
+    rows.push({kind:'oil', id:p.id, name:p.name, unit:p.unit||'', qty, rate, value:qty*rate});
+  });
+  const sum = (k)=>rows.filter(x=>k==='all'||x.kind===k).reduce((s,x)=>s+x.value,0);
+  return {date:dateStr, rows, fuelValue:sum('tank')+sum('bowser'), oilValue:sum('oil'), totalValue:sum('all')};
+}
+// Latest oil purchase rate per product on or before a date; the product's current cost rate is the
+// fallback when it was never bought through the app.
+async function latestOilRates(uptoDate){
+  const seen = {};   // productId -> {rate, date}; newest-first scan, so only a later date replaces
+  let m = monthIdOf(uptoDate);
+  for (let i=0; i<24; i++){
+    const data = await getMonthDoc('oilPurchasesMonthly', m);
+    ((data&&data.items)||[]).forEach(it=>{
+      if (it.date>uptoDate || !it.productId || !num(it.rate)) return;
+      if (!seen[it.productId] || it.date > seen[it.productId].date) seen[it.productId] = {rate:num(it.rate), date:it.date};
+    });
+    m = shiftMonth(m, -1);
+  }
+  const out = {};
+  Object.entries(seen).forEach(([k,v])=>{ out[k] = v.rate; });
+  return out;
 }
 
 function deltaPill(cur, prev, opts){
@@ -2892,23 +2971,48 @@ function renderReportBody(body, cfg, r, c){
     ${foot?`<tfoot><tr>${foot.map((v,i)=>`<td class="${head[i].num?'num':''}" style="font-weight:700;">${v}</td>`).join('')}</tr></tfoot>`:''}</table></div></div>`;
   const sortD = (a,b)=>b.date.localeCompare(a.date);
   const P = (k)=> c ? c[k] : null;
+  // Stock figures are objects, so comparisons read their total.
+  const P2 = (cmp, k)=> cmp && cmp[k] ? cmp[k].totalValue : null;
   const parts = [];
   parts.push(`<div class="section-head"><h2>${title}</h2><span class="hint">${r.days} day${r.days===1?'':'s'}${filt.length?' · '+esc(filt.join(' · ')):''}</span></div>`);
 
 
-  if (has('summary')) parts.push(`<div class="grid grid-kpi" style="margin-bottom:22px;">
-    ${kpi('Fuel sales', r.fuelRevenue, P('fuelRevenue'), liters(r.liters))}
-    ${kpi('Oil sales', r.oilRevenue, P('oilRevenue'), 'total takings '+moneyShort(r.revenue))}
-    ${kpi('Fuel purchase cost', r.fuelCost, P('fuelCost'), 'from deliveries logged', {lowerIsBetter:true})}
-    ${kpi('Oil cost of sales', r.oilCost, P('oilCost'), 'qty sold × cost rate', {lowerIsBetter:true})}
-    ${kpi('Gross margin', r.grossMargin, P('grossMargin'), '', {signColor:true})}
-    ${kpi('Expenses', r.expenseTotal, P('expenseTotal'), '', {lowerIsBetter:true})}
-    ${kpi('Salary', r.salary, P('salary'), '', {lowerIsBetter:true})}
-    ${kpi('Other income', r.otherIncome, P('otherIncome'), 'journal + receipts')}
-    ${kpi('Other expenses', r.otherExpense, P('otherExpense'), 'journal + payments', {lowerIsBetter:true})}
-    ${kpi('Net P&L', r.net, P('net'), '', {signColor:true})}
-    ${kpi('Fuel liters', r.liters, P('liters'), '', {fmt:liters})}
-  </div>`);
+  if (has('summary')){
+    parts.push(`<div class="grid grid-kpi" style="margin-bottom:22px;">
+      ${kpi('Sales', r.revenue, P('revenue'), `fuel ${moneyShort(r.fuelRevenue)} · oil ${moneyShort(r.oilRevenue)}`)}
+      ${kpi('Purchases', r.purchaseTotal, P('purchaseTotal'), `fuel ${moneyShort(r.fuelCost)} · oil ${moneyShort(r.oilPurchaseCost)}`, {lowerIsBetter:true})}
+      ${kpi('Opening stock', r.openingStock.totalValue, P2(c,'openingStock'), fmtDateLabel(r.openingStock.date))}
+      ${kpi('Closing stock', r.closingStock.totalValue, P2(c,'closingStock'), fmtDateLabel(r.closingStock.date))}
+      ${kpi('Gross P&L', r.grossMargin, P('grossMargin'), 'sales + closing − opening − purchases', {signColor:true})}
+      ${kpi('Expenses', r.totalExpenses, P('totalExpenses'), `running ${moneyShort(r.expenseTotal)} · salary ${moneyShort(r.salary)} · other ${moneyShort(r.otherExpense)}`, {lowerIsBetter:true})}
+      ${kpi('Other income', r.otherIncome, P('otherIncome'), 'journal + receipts')}
+      ${kpi('Net P&L', r.net, P('net'), 'gross + other income − expenses', {signColor:true})}
+      ${kpi('Fuel liters', r.liters, P('liters'), '', {fmt:liters})}
+    </div>`);
+    // The same figures as a trading account, so the arithmetic is auditable line by line.
+    const plLine = (label, val, opts)=>{
+      opts = opts||{};
+      return `<tr${opts.strong?' style="font-weight:700;"':''}><td>${opts.indent?'<span style="padding-left:14px;"></span>':''}${label}</td><td class="num"${opts.color?` style="color:var(--${num(val)>=0?'good':'critical'});"`:''}>${opts.sign&&num(val)<0?'− '+money(Math.abs(val)):money(val)}</td>${c?`<td class="num">${money(opts.prev!=null?opts.prev:0)}</td>`:''}</tr>`;
+    };
+    const cp = (k)=> c ? (typeof c[k]==='object' && c[k] ? c[k].totalValue : c[k]) : null;
+    parts.push(`<div class="section-head"><h2>Profit &amp; Loss</h2><span class="hint">trading account</span></div>
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>Item</th><th class="num">Amount</th>${c?`<th class="num">${esc(rangeLabel(c.from,c.to))}</th>`:''}</tr></thead>
+        <tbody>
+          ${plLine('Sales (fuel + oil)', r.revenue, {prev:cp('revenue')})}
+          ${plLine('Add: Closing stock', r.closingStock.totalValue, {prev:cp('closingStock')})}
+          ${plLine('Less: Opening stock', -r.openingStock.totalValue, {prev:c?-cp('openingStock'):null})}
+          ${plLine('Less: Purchases (fuel + oil)', -r.purchaseTotal, {prev:c?-cp('purchaseTotal'):null})}
+          ${plLine('Gross P&L', r.grossMargin, {strong:true, color:true, prev:cp('grossMargin')})}
+          ${plLine('Add: Other income', r.otherIncome, {indent:true, prev:cp('otherIncome')})}
+          ${plLine('Less: Expenses — running', -r.expenseTotal, {indent:true, prev:c?-cp('expenseTotal'):null})}
+          ${plLine('Less: Expenses — salary', -r.salary, {indent:true, prev:c?-cp('salary'):null})}
+          ${plLine('Less: Expenses — other (journal)', -r.otherExpense, {indent:true, prev:c?-cp('otherExpense'):null})}
+          ${plLine('Net P&L', r.net, {strong:true, color:true, prev:cp('net')})}
+        </tbody>
+      </table></div></div>
+      <div class="hint" style="color:var(--text-faint);font-size:12px;margin:6px 0 4px;">Stock is valued at cost — the purchase rate ruling on each date — and covers tanks, bowsers and lubricants. Opening stock is the position on ${fmtDateLabel(r.openingStock.date)}.</div>`);
+  }
 
   if (has('balances')){
     const cash = state.ledgers.find(l=>l.cashInHand);
@@ -3105,13 +3209,20 @@ function exportReportExcel(rep){
   const filt = [cfg.staff && 'Staff: '+((state.staff.find(s=>s.id===cfg.staff)||{}).name||''), cfg.product && 'Product: '+(state.config.products[cfg.product]||''), cfg.nozzle && 'Nozzle: '+((state.nozzles.find(n=>n.id===cfg.nozzle)||{}).name||''), cfg.creditor && 'Creditor: '+((state.creditors.find(x=>x.id===cfg.creditor)||{}).name||''), cfg.method && 'Method: '+cfg.method].filter(Boolean);
 
   if (has('summary') || has('collections') || has('products') || has('balances')){
-    const line = (name, k, opts)=> c ? [name, r2(r[k]), r2(c[k]), r2(r[k]-c[k])] : [name, r2(r[k])];
+    // '_opening' / '_closing' read the stock snapshot objects and are shown as deductions/additions.
+    const v = (o,k)=> !o ? 0 : (k==='_opening' ? -num(o.openingStock&&o.openingStock.totalValue) : k==='_closing' ? num(o.closingStock&&o.closingStock.totalValue) : num(o[k]));
+    const line = (name, k)=> c ? [name, r2(v(r,k)), r2(v(c,k)), r2(v(r,k)-v(c,k))] : [name, r2(v(r,k))];
     const rows = [[station], [`Report — ${label}`], filt.length?['Filters', filt.join(' · ')]:[], []];
     if (has('summary')){
       rows.push(c ? ['Item', 'This period (₹)', `Previous (${rangeLabel(c.from,c.to)})`, 'Change'] : ['Item', 'Amount (₹)']);
-      rows.push(line('Fuel sales','fuelRevenue'), line('Oil sales','oilRevenue'), line('Total takings','revenue'), line('Fuel liters sold','liters'),
-        line('Fuel purchase cost','fuelCost'), line('Oil cost of sales','oilCost'), line('Gross margin','grossMargin'), line('Expenses','expenseTotal'), line('Salary','salary'),
-        line('Other income (journal + receipts)','otherIncome'), line('Other expenses (journal)','otherExpense'), line('Net P&L','net'), []);
+      rows.push(line('Sales — fuel','fuelRevenue'), line('Sales — oil','oilRevenue'), line('Sales total','revenue'),
+        line('Add: Closing stock','_closing'), line('Less: Opening stock','_opening'),
+        line('Less: Purchases — fuel','fuelCost'), line('Less: Purchases — oil','oilPurchaseCost'), line('Purchases total','purchaseTotal'),
+        line('GROSS P&L','grossMargin'),
+        line('Add: Other income (journal + receipts)','otherIncome'),
+        line('Less: Expenses — running','expenseTotal'), line('Less: Expenses — salary','salary'), line('Less: Expenses — other (journal)','otherExpense'),
+        line('Expenses total','totalExpenses'),
+        line('NET P&L','net'), [], line('Fuel liters sold','liters'), []);
     }
     if (has('collections') && r.payTotals){
       rows.push(c?['Collections by method','This period','Previous','Change']:['Collections by method', 'Amount (₹)']);
