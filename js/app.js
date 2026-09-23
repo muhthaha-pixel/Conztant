@@ -2961,8 +2961,27 @@ async function ledgerPeriodBalances(r){
   }
   const movementIn = {};
   buildLedgerPostings(r).forEach(p=>{ movementIn[p.key] = (movementIn[p.key]||0) + p.dr - p.cr; });
+  // An account whose opening balance has been confirmed against a statement is anchored to that
+  // figure and built forward, rather than wound back from today's balance — so the report no longer
+  // depends on the live balance being right. Where the two disagree, the difference is reported.
+  const anchored = {};
+  const withAnchor = ledgerAccountList().filter(a=>a.openingDate && a.openingBalance!=null && r.from >= a.openingDate);
+  if (withAnchor.length){
+    const earliest = withAnchor.map(a=>a.openingDate).sort()[0];
+    const since = earliest <= r.to ? buildLedgerPostings(await computeReport(earliest, r.to, {})) : [];
+    withAnchor.forEach(a=>{
+      let before = 0, within = 0;
+      since.forEach(p=>{
+        if (p.key !== a.key || p.date < a.openingDate) return;
+        if (p.date < r.from) before += p.dr - p.cr; else within += p.dr - p.cr;
+      });
+      const opening = num(a.openingBalance) + before;
+      anchored[a.key] = {opening, closing: opening + within, movement: within, anchored:true};
+    });
+  }
   const out = {};
   ledgerAccountList().forEach(a=>{
+    if (anchored[a.key]){ out[a.key] = anchored[a.key]; return; }
     const closing = num(a.balance) - (movementAfter[a.key]||0);
     out[a.key] = {closing, opening: closing - (movementIn[a.key]||0), movement: movementIn[a.key]||0};
   });
@@ -2985,7 +3004,7 @@ function ledgerStatements(r, pick){
     const dr = rows.reduce((s,x)=>s+x.dr,0), cr = rows.reduce((s,x)=>s+x.cr,0);
     const b = bal[a.key] || {};
     return Object.assign({}, a, {rows, dr, cr, movement:dr-cr,
-      opening: b.opening!=null ? b.opening : null, closing: b.closing!=null ? b.closing : num(a.balance)});
+      opening: b.opening!=null ? b.opening : null, closing: b.closing!=null ? b.closing : num(a.balance), anchored: !!b.anchored});
   }).filter(a=> (pick && pick!=='all' && !pick.startsWith('grp:')) ? true : (a.rows.length || num(a.balance) || num(a.opening)));
 }
 // ---- stock valuation ---------------------------------------------------------------------
@@ -3599,6 +3618,7 @@ function renderReportBody(body, cfg, r, c){
             <tfoot><tr><td colspan="3" style="font-weight:700;">Closing balance</td><td class="num" style="font-weight:700;">${money(a.dr)}</td><td class="num" style="font-weight:700;">${money(a.cr)}</td><td class="num" style="font-weight:700;">${ledgerBalanceLabel(a.closing)}</td></tr></tfoot>
           </table></div>
           ${a.openingDate && r.from < a.openingDate ? `<div class="hint" style="color:var(--warning);font-size:12px;margin-top:8px;">This period starts before ${esc(fmtDateLabel(a.openingDate))}, the date your confirmed balance of <strong>${money(a.openingBalance)}</strong> applies to. Anything that happened before your records begin is rolled into the opening figure above, so it will not match a bank statement. Run the report from ${esc(fmtDateLabel(a.openingDate))} for figures that tie out.</div>` : ''}
+          ${a.anchored ? `<div class="hint" style="font-size:12px;margin-top:8px;color:${Math.abs(num(a.closing)-num(a.balance))<0.5?'var(--text-faint)':'var(--warning)'};">Built forward from your confirmed balance of <strong>${money(a.openingBalance)}</strong> on ${esc(fmtDateLabel(a.openingDate))}.${Math.abs(num(a.closing)-num(a.balance))<0.5 ? ' It agrees with the running balance the app holds.' : ` The app's live balance is <strong>${money(a.balance)}</strong> — a difference of <strong>${money(num(a.balance)-num(a.closing))}</strong>, which usually means something was recorded without a date in this range, or the live balance was corrected by hand.`}</div>` : ''}
         </div>`);
       });
     });
