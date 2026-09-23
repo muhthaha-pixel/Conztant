@@ -966,7 +966,7 @@ function renderDutyForm(mount){
         <div class="field"><label>UPI (₹)</label><input type="number" step="0.01" id="dfUpi" value="${dutyForm.upi||0}"></div>
         <div class="field"><label>HP Card (₹)</label><input type="number" step="0.01" id="dfHp" value="${dutyForm.hpCard||0}"></div>
         <div class="field"><label>Credit (₹)</label><input type="text" id="dfCreditTotal" value="₹0" disabled></div>
-        <div class="field"><label>Expenses (₹)</label><input type="text" id="dfExpenseTotal" value="₹0" disabled></div>
+        <div class="field"><label>Payments (₹)</label><input type="text" id="dfExpenseTotal" value="₹0" disabled></div>
         <div class="field"><label>Cash (balance)</label><input type="text" id="dfCash" value="₹0" disabled></div>
       </div>
       <div class="field" style="max-width:340px;margin-top:4px;">
@@ -981,7 +981,7 @@ function renderDutyForm(mount){
       <div class="section-head" style="margin:16px 0 8px;"><h2 style="font-size:13.5px;">Credit sales</h2><button class="btn ghost sm" id="dfAddCredit">${icon('plus')} Add creditor line</button></div>
       <div id="dfCreditRows"></div>
 
-      <div class="section-head" style="margin:20px 0 8px;"><h2 style="font-size:13.5px;">Expenses paid from till</h2><button class="btn ghost sm" id="dfAddExpense">${icon('plus')} Add expense</button></div>
+      <div class="section-head" style="margin:20px 0 8px;"><h2 style="font-size:13.5px;">Payments from till</h2><button class="btn ghost sm" id="dfAddExpense">${icon('plus')} Add payment</button></div>
       <div id="dfExpenseRows"></div>
 
       <div class="section-head" style="margin:20px 0 8px;"><h2 style="font-size:13.5px;">Cash denomination count</h2></div>
@@ -1014,7 +1014,7 @@ function renderDutyForm(mount){
   });
   updateNozzleHint();
   $('#dfAddCredit').onclick = ()=>{ dutyForm.creditSales.push({id:uid(), creditorId:'', creditorName:'', amount:0, liters:0, indentNo:'', vehicleNo:''}); renderCreditRows(); };
-  $('#dfAddExpense').onclick = ()=>{ dutyForm.expenses.push({id:uid(), category:EXPENSE_CATEGORIES[0], description:'', amount:0}); renderDutyExpenseRows(); };
+  $('#dfAddExpense').onclick = ()=>{ dutyForm.expenses.push({id:uid(), account:'', category:'', description:'', amount:0}); renderDutyExpenseRows(); };
   $('#dfAddOil').onclick = ()=>{ dutyForm.oils.push({id:uid(), productId:'', name:'', qty:0, rate:0, amount:0, savedQty:0}); renderOilRows(); };
   $('#dfSave').onclick = saveDutyEntry;
 
@@ -1236,21 +1236,51 @@ function renderCreditRows(){
   recomputePayments();
 }
 
+// Cash paid out during the duty. The account is picked from the full ledger list, so a till payment
+// can be a running cost, a staff advance, a supplier settlement — whatever it really was.
+function dutyPayAccountOptions(sel){
+  const groups = {};
+  state.ledgers.filter(l=>l.active!==false && !l.cashInHand).forEach(l=>{
+    const g = (LEDGER_GROUPS[l.group]||{}).label || 'Other';
+    (groups[g] = groups[g]||[]).push({key:'led:'+l.id, label:l.name});
+  });
+  state.creditors.filter(c=>c.active!==false).forEach(c=>{ (groups['Creditors'] = groups['Creditors']||[]).push({key:'cred:'+c.id, label:c.name}); });
+  state.suppliers.filter(s=>s.active!==false).forEach(s=>{ (groups['Suppliers'] = groups['Suppliers']||[]).push({key:'sup:'+s.id, label:s.name}); });
+  const opts = Object.entries(groups).map(([g,list])=>
+    `<optgroup label="${esc(g)}">${list.map(o=>`<option value="${esc(o.key)}" ${o.key===sel?'selected':''}>${esc(o.label)}</option>`).join('')}</optgroup>`).join('');
+  // Categories remain for a quick entry when no ledger fits, and for duties saved before ledgers existed.
+  const cats = `<optgroup label="Categories">${EXPENSE_CATEGORIES.map(c=>`<option value="cat:${esc(c)}" ${('cat:'+c)===sel?'selected':''}>${esc(c)}</option>`).join('')}</optgroup>`;
+  return `<option value="">Select account…</option>` + opts + cats;
+}
+// The plain account name, without the "(Expense)" style suffix the posting picker adds.
+function dutyPayLabel(key, fallback){
+  if (!key) return fallback||'';
+  if (key.startsWith('cat:')) return key.slice(4);
+  const [kind, id] = key.split(':');
+  const rec = kind==='led' ? state.ledgers.find(x=>x.id===id)
+            : kind==='cred' ? state.creditors.find(x=>x.id===id)
+            : kind==='sup' ? state.suppliers.find(x=>x.id===id) : null;
+  return (rec && rec.name) || targetLabel(key) || fallback || key;
+}
 function renderDutyExpenseRows(){
   const el = $('#dfExpenseRows'); if(!el) return;
-  if (!dutyForm.expenses.length){ el.innerHTML = `<div class="hint" style="color:var(--text-faint);font-size:12.5px;">No expenses added.</div>`; recomputePayments(); return; }
-  el.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Category</th><th>Description</th><th class="num">Amount</th><th></th></tr></thead><tbody id="dfExpenseTbody"></tbody></table></div>
-    <div class="hint" style="color:var(--text-faint);font-size:12px;margin-top:6px;">Cash paid out during this duty (e.g. small repairs, tea) — it's logged to Expenses and deducted from the cash you should have in hand.</div>`;
+  if (!dutyForm.expenses.length){ el.innerHTML = `<div class="hint" style="color:var(--text-faint);font-size:12.5px;">No payments added.</div>`; recomputePayments(); return; }
+  el.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Account / category</th><th>Description</th><th class="num">Amount</th><th></th></tr></thead><tbody id="dfExpenseTbody"></tbody></table></div>
+    <div class="hint" style="color:var(--text-faint);font-size:12px;margin-top:6px;">Cash paid out during this duty (e.g. small repairs, tea, a staff advance) — it is deducted from the cash you should have in hand and posted to the account you pick. Manage the list under Setup → Ledgers.</div>`;
   const tbody = $('#dfExpenseTbody');
   dutyForm.expenses.forEach(e=>{
     const tr = document.createElement('tr'); tr.dataset.id = e.id;
-    tr.innerHTML = `<td><select class="eCat">${EXPENSE_CATEGORIES.map(cat=>`<option ${cat===e.category?'selected':''}>${esc(cat)}</option>`).join('')}</select></td>
+    // Older rows stored only a category name; show them selected on the category option.
+    const sel = e.account || (e.category ? 'cat:'+e.category : '');
+    tr.innerHTML = `<td><select class="eCat" style="max-width:230px;">${dutyPayAccountOptions(sel)}</select></td>
       <td><input type="text" class="eDesc" value="${esc(e.description||'')}" style="width:150px;"></td>
       <td class="num"><input type="number" step="0.01" class="eAmt" value="${e.amount||0}" style="width:90px;text-align:right;"></td>
       <td><button class="btn ghost sm eRemove">${icon('trash')}</button></td>`;
     tbody.appendChild(tr);
     const sync = ()=>{
-      e.category = tr.querySelector('.eCat').value;
+      const key = tr.querySelector('.eCat').value;
+      e.account = key;
+      e.category = dutyPayLabel(key, e.category);
       e.description = tr.querySelector('.eDesc').value;
       e.amount = num(tr.querySelector('.eAmt').value);
       recomputePayments();
@@ -1338,7 +1368,7 @@ async function saveDutyEntry(){
       startTime:dutyForm.startTime, endTime:dutyForm.endTime, nozzleIds:dutyForm.nozzleIds, entries,
       pay:{pos:dutyForm.pos||0, upi:dutyForm.upi||0, hpCard:dutyForm.hpCard||0, bankAccountId:dutyForm.bankAccountId||''},
       creditSales: dutyForm.creditSales.filter(c=>num(c.amount)>0 || num(c.liters)>0),
-      expenses: dutyForm.expenses.filter(e=>num(e.amount)>0),
+      expenses: dutyForm.expenses.filter(e=>num(e.amount)>0).map(e=>({id:e.id, account:e.account||'', category:e.category||'', description:e.description||'', amount:num(e.amount)})),
       oils: (dutyForm.oils||[]).filter(o=>num(o.amount)>0 || num(o.qty)>0)
         .map(o=>({id:o.id, productId:o.productId||'', name:o.name||'', qty:num(o.qty), rate:num(o.rate), amount:num(o.amount)})),
       cashCount: dutyForm.cashCount,
@@ -1447,6 +1477,16 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
     if (amtDelta) patch.balance = num(creditor.balance) + amtDelta;
     if (ltrDelta && creditor.isBowser) patch.bowserStockL = num(creditor.bowserStockL) + ltrDelta;
     if (Object.keys(patch).length) await state.db.doc('creditors/'+cid).update(patch).catch(()=>{});
+  }
+
+  // Till payments post to the account each line names (ledger, creditor or supplier) — the cash side
+  // is already covered, because a duty's cash figure is net of these payments. Only the CHANGE since
+  // the last save is applied, so re-saving an edit never double-posts.
+  const tillBy = (arr)=>{ const m={}; (arr||[]).forEach(e=>{ if (e.account && !e.account.startsWith('cat:')) m[e.account] = (m[e.account]||0) + num(e.amount); }); return m; };
+  const oldTill = tillBy((prev && prev.expenses) || []), newTill = tillBy(expenses);
+  for (const key of new Set([...Object.keys(oldTill), ...Object.keys(newTill)])){
+    const delta = (newTill[key]||0) - (oldTill[key]||0);
+    if (delta) await applyPosting(key, delta, {date, narration:`Till payment — ${staffName}`, journalId:id});
   }
 
   // Oil sold on this duty comes out of that product's stock — only the CHANGE since this duty's
@@ -1561,6 +1601,7 @@ async function deleteDuty(date, dutyId){
   }
   await syncDutyExpenses(date, dutyId, []);
   for (const o of (d.oils||[])) if (o.productId && num(o.qty)) await adjustOilStock(o.productId, num(o.qty));
+  for (const e of (d.expenses||[])) if (e.account && !e.account.startsWith('cat:') && num(e.amount)) await applyPosting(e.account, -num(e.amount), {date, narration:`Deleted duty — ${d.staffName}`, journalId:dutyId});
   const pay = d.pay || {};
   const bankAmt = num(pay.pos) + num(pay.upi);
   if (pay.bankAccountId && bankAmt){
@@ -1590,7 +1631,24 @@ async function syncDutyExpenses(date, dutyId, expenseItems){
   if (!list.length && !existing) return;
   const data = existing || {items:[], total:0};
   const kept = (data.items||[]).filter(it=>it.dutyId!==dutyId);
-  const mine = list.map(e=>({id:e.id||uid(), date, category:e.category||EXPENSE_CATEGORIES[0], description:e.description||'', amount:num(e.amount), source:'duty', dutyId}));
+  // A till payment against an expense ledger (or a plain category) is a running cost and counts in
+  // the P&L expense line; one against an asset, liability, creditor or supplier is a balance-sheet
+  // movement, so it is mirrored as a payment and stays out of the P&L.
+  const isExpenseLine = (key)=>{
+    if (!key || key.startsWith('cat:')) return true;
+    if (!key.startsWith('led:')) return false;
+    const l = state.ledgers.find(x=>x.id===key.slice(4));
+    return !l || l.group==='expense';
+  };
+  const mine = list.map(e=>{
+    const key = e.account||'';
+    const label = dutyPayLabel(key, e.category) || EXPENSE_CATEGORIES[0];
+    const base = {id:e.id||uid(), date, description:e.description||'', amount:num(e.amount), source:'duty', dutyId,
+                  account:key, ledger: key.startsWith('cat:') ? '' : key, mode:'Cash', paidFrom:''};
+    return isExpenseLine(key)
+      ? Object.assign(base, {kind:'expense', category:label})
+      : Object.assign(base, {kind:'payment', party:label, item:'Other payment', category:label});
+  });
   data.items = kept.concat(mine);
   data.total = data.items.reduce((s,it)=>s+num(it.amount),0);
   await setMonthDoc('expensesMonthly', monthId, data);
@@ -2706,7 +2764,8 @@ function buildLedgerPostings(r){
     const who = expenseKind(it)==='payment' ? `Payment — ${[it.party, it.item].filter(Boolean).join(' · ')}` : `Expense — ${it.category||''}`;
     const label = who + (it.description?' · '+it.description:'');
     if (it.paidFrom) add(it.paidFrom, it.date, label, 0, it.amount);
-    if (expenseKind(it)==='payment' && it.ledger) add(it.ledger, it.date, label, it.amount, 0);
+    // Payments debit the account they settle; a duty till payment does the same through its ledger.
+    if (it.ledger && (expenseKind(it)==='payment' || it.source==='duty')) add(it.ledger, it.date, label, it.amount, 0);
   });
   r.receipts.forEach(it=>{
     const label = `Receipt — ${receiptFromLabel(it)}${it.narration?' · '+it.narration:''}`;
