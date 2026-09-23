@@ -2757,11 +2757,15 @@ async function latestPurchaseRates(uptoDate){
   }
   return {byTank, byProduct};
 }
+// Latest purchase for the tank, else the latest for that product, else the standing cost rate set
+// in Setup → Rates. Without any of those, fuel on hand would be valued at zero and the trading
+// account would read as if it were free, so the report flags rows that fall through to 0.
 function valuationRate(rates, tankId, product){
   const t = rates && rates.byTank[tankId];
   if (t) return t.rate;
   const p = rates && rates.byProduct[product];
-  return p ? p.rate : 0;
+  if (p) return p.rate;
+  return num((state.config.costRates||{})[product]);
 }
 // Quantity and cost of every litre the station is holding — tanks plus any bowser stock.
 function stockValuation(rates){
@@ -2849,6 +2853,18 @@ async function latestOilRates(uptoDate){
   const out = {};
   Object.entries(seen).forEach(([k,v])=>{ out[k] = v.rate; });
   return out;
+}
+
+// Litres/units held, so a zero VALUE with stock on hand (no cost rate known) is obvious rather
+// than looking like an empty tank.
+function stockQtyNote(snap){
+  const fuelQty = (snap.rows||[]).filter(x=>x.kind!=='oil').reduce((s,x)=>s+num(x.qty),0);
+  const oilQty = (snap.rows||[]).filter(x=>x.kind==='oil').reduce((s,x)=>s+num(x.qty),0);
+  return liters(fuelQty) + (oilQty ? ' · oil '+numFmt(oilQty) : '');
+}
+// Rows holding stock that valued at zero because no purchase rate is known for them.
+function unvaluedStock(snap){
+  return (snap.rows||[]).filter(x=>num(x.qty)>0 && !num(x.rate));
 }
 
 function deltaPill(cur, prev, opts){
@@ -2981,8 +2997,8 @@ function renderReportBody(body, cfg, r, c){
     parts.push(`<div class="grid grid-kpi" style="margin-bottom:22px;">
       ${kpi('Sales', r.revenue, P('revenue'), `fuel ${moneyShort(r.fuelRevenue)} · oil ${moneyShort(r.oilRevenue)}`)}
       ${kpi('Purchases', r.purchaseTotal, P('purchaseTotal'), `fuel ${moneyShort(r.fuelCost)} · oil ${moneyShort(r.oilPurchaseCost)}`, {lowerIsBetter:true})}
-      ${kpi('Opening stock', r.openingStock.totalValue, P2(c,'openingStock'), fmtDateLabel(r.openingStock.date))}
-      ${kpi('Closing stock', r.closingStock.totalValue, P2(c,'closingStock'), fmtDateLabel(r.closingStock.date))}
+      ${kpi('Opening stock', r.openingStock.totalValue, P2(c,'openingStock'), fmtDateLabel(r.openingStock.date)+' · '+stockQtyNote(r.openingStock))}
+      ${kpi('Closing stock', r.closingStock.totalValue, P2(c,'closingStock'), fmtDateLabel(r.closingStock.date)+' · '+stockQtyNote(r.closingStock))}
       ${kpi('Gross P&L', r.grossMargin, P('grossMargin'), 'sales + closing − opening − purchases', {signColor:true})}
       ${kpi('Expenses', r.totalExpenses, P('totalExpenses'), `running ${moneyShort(r.expenseTotal)} · salary ${moneyShort(r.salary)} · other ${moneyShort(r.otherExpense)}`, {lowerIsBetter:true})}
       ${kpi('Other income', r.otherIncome, P('otherIncome'), 'journal + receipts')}
@@ -3013,6 +3029,15 @@ function renderReportBody(body, cfg, r, c){
     const plDrTotal = plDr.reduce((s,x)=>s+num(x[1]), 0);
     const plCrTotal = plCr.reduce((s,x)=>s+num(x[1]), 0);
     parts.push(`
+      ${(()=>{
+        // Stock with no known cost rate values at zero, which inflates gross profit — say so plainly.
+        const bad = [...new Set(unvaluedStock(r.openingStock).concat(unvaluedStock(r.closingStock)).map(x=>x.name))];
+        if (!bad.length && r.purchaseTotal) return '';
+        const msgs = [];
+        if (bad.length) msgs.push(`<strong>${esc(bad.join(', '))}</strong> hold stock but no purchase rate is known, so they are valued at ₹0 — which overstates gross profit. Set a cost rate in <strong>Setup → Rates → Cost rates</strong>, or record the purchase on the <strong>Purchase</strong> tab.`);
+        if (!r.purchaseTotal) msgs.push('No purchases are recorded in this period, so the whole of sales shows as gross profit. Enter deliveries on the <strong>Purchase</strong> tab for a true figure.');
+        return `<div class="banner">${icon('receipt')}<div>${msgs.join('<br>')}</div></div>`;
+      })()}
       <div class="section-head"><h2>Trading Account</h2><span class="hint">${esc(rangeLabel(r.from, r.to))}</span></div>
       <div class="card"><div class="table-wrap"><table>
         <thead><tr><th>Particulars (Dr)</th><th class="num">Amount</th><th>Particulars (Cr)</th><th class="num">Amount</th></tr></thead>
@@ -4401,6 +4426,16 @@ async function renderSetupRates(body){
       </div>
       <div id="rtMsg" style="font-size:13px;"></div>
     </div>
+
+    <div class="section-head"><h2>Cost rates (purchase price)</h2><span class="hint">used to value stock</span></div>
+    <div class="banner info">${icon('tank')}<div>Stock in your tanks is valued at the rate you last <strong>bought</strong> it for. Until a purchase is recorded on the Purchase tab, these figures stand in — without them, fuel on hand values at ₹0 and the trading account overstates profit. Any purchase you record later takes precedence automatically.</div></div>
+    <div class="card card-pad">
+      <div class="form-grid">
+        ${PRODUCT_KEYS.map(k=>`<div class="field"><label>${esc(state.config.products[k]||k)} cost (₹/L)</label><input type="number" step="0.01" class="ctVal" data-k="${k}" value="${num((state.config.costRates||{})[k])||''}" placeholder="0.00"></div>`).join('')}
+        <div class="field"><button class="btn primary" id="ctSave" style="width:100%" ${state.dbReady?'':'disabled'}>Save cost rates</button></div>
+      </div>
+      <div id="ctMsg" style="font-size:13px;"></div>
+    </div>
   `;
   $('#rtSave').onclick = async ()=>{
     const d = $('#rtDate').value;
@@ -4408,6 +4443,16 @@ async function renderSetupRates(body){
     $$('.rtVal', body).forEach(inp=>{ if (inp.value!=='') rates[inp.dataset.k] = num(inp.value); });
     await setRateForDate(d, rates);
     $('#rtMsg').innerHTML = `<span style="color:var(--good)">Rates saved for ${fmtDateLabel(d)}.</span>`;
+  };
+  $('#ctSave').onclick = async ()=>{
+    const costRates = Object.assign({}, state.config.costRates||{});
+    $$('.ctVal', body).forEach(inp=>{ costRates[inp.dataset.k] = num(inp.value); });
+    await state.db.doc('config/main').update({costRates}).catch(async ()=>{
+      await state.db.doc('config/main').set(Object.assign({}, state.config, {costRates}));
+    });
+    state.config.costRates = costRates;
+    await logActivity({entity:'Config', entityLabel:'Cost rates', action:'edit', summary:PRODUCT_KEYS.map(k=>`${state.config.products[k]||k} ${money(costRates[k])}`).join(' · ')});
+    $('#ctMsg').innerHTML = `<span style="color:var(--good)">Cost rates saved — stock valuation will use these until a purchase is recorded.</span>`;
   };
 }
 
