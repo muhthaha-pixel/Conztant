@@ -2650,7 +2650,7 @@ async function computeReport(from, to, f){
   r.stockValue = stockValuation(r.stockRates);
   r.expenseTotal = r.expenses.reduce((s,i)=>s+num(i.amount),0);
   const pl = journalPL({items:r.journal}, {items:r.receipts}, {items:r.payments});
-  r.otherIncome = pl.income; r.otherExpense = pl.expense;
+  r.otherIncome = pl.income; r.otherExpense = pl.expense; r.reversedPostings = pl.reversed;
 
   // Trading account:
   //   Gross P&L = Sales + Closing stock − Opening stock − Purchases
@@ -3041,6 +3041,21 @@ function renderReportBody(body, cfg, r, c){
         if (bad.length) msgs.push(`<strong>${esc(bad.join(', '))}</strong> hold stock but no purchase rate is known, so they are valued at ₹0 — which overstates gross profit. Enter what that stock cost in <strong>Setup → Tanks → Stock cost rates</strong>, or record the delivery on the <strong>Purchase</strong> tab.`);
         if (!r.purchaseTotal) msgs.push('No purchases are recorded in this period, so the whole of sales shows as gross profit. Enter deliveries on the <strong>Purchase</strong> tab for a true figure.');
         return `<div class="banner">${icon('receipt')}<div>${msgs.join('<br>')}</div></div>`;
+      })()}
+      ${(()=>{
+        // An expense total that has gone negative (or income negative) means entries were posted the
+        // wrong way round — which would otherwise show up as extra profit. Name them so they can be fixed.
+        const rev = r.reversedPostings || [];
+        if (!rev.length && r.totalExpenses >= 0 && r.otherIncome >= 0) return '';
+        const lines = rev.map(x=>`<li style="font-size:12.5px;">${esc(fmtDateLabel(x.date))} · <strong>${esc(x.source)}</strong> ${esc(x.label||'')} — ${money(x.amount)} <span style="color:var(--text-faint);">(${esc(x.why)})</span></li>`).join('');
+        return `<div class="banner">${icon('book')}<div>
+          <strong>Check these entries — they look posted in the reverse direction.</strong>
+          An expense ledger should be <strong>debited</strong> when you incur a cost and an income ledger <strong>credited</strong> when you earn.
+          Posted the other way they reduce expenses (or income), which makes profit look higher than it is.
+          ${r.totalExpenses<0?`<br>Expenses for this period total <strong>${money(r.totalExpenses)}</strong> — a negative total is almost always a reversed entry.`:''}
+          ${lines?`<ul style="margin:6px 0 0;padding-left:18px;">${lines}</ul>`:''}
+          <div style="font-size:12.5px;margin-top:6px;">Fix them in <strong>Journal</strong>, <strong>Receipts</strong> or <strong>Payments / Expenses</strong> — swap the debit and credit, or record a plain expense under Payments / Expenses instead.</div>
+        </div></div>`;
       })()}
       <div class="section-head"><h2>Trading Account</h2><span class="hint">${esc(rangeLabel(r.from, r.to))}</span></div>
       <div class="card"><div class="table-wrap"><table>
@@ -3566,24 +3581,34 @@ async function applyJournalItem(item, sign){
   await applyPosting(item.credit, -amt, meta);
 }
 // P&L effect of a month's journal: income = net credits to income ledgers, expense = net debits to expense ledgers.
+// Income and expense reaching the P&L from the ledger side. An expense ledger is normally DEBITED
+// and an income ledger CREDITED; the opposite direction is a valid reversal (a refund), but is far
+// more often an entry posted the wrong way round — so those items are returned in `reversed` for the
+// report to flag rather than silently turning an expense into extra profit.
 function journalPL(journalData, receiptsData, paymentsData){
   let income=0, expense=0;
+  const reversed = [];
   const groupOf = (key)=>{ if (!key || !key.startsWith('led:')) return null; const l = state.ledgers.find(x=>x.id===key.slice(4)); return l ? l.group : null; };
+  const ledName = (key)=>targetLabel(key) || key || '';
   ((journalData&&journalData.items)||[]).forEach(it=>{
     const a = num(it.amount);
     const dg = groupOf(it.debit), cg = groupOf(it.credit);
-    if (dg==='income') income -= a; if (cg==='income') income += a;
-    if (dg==='expense') expense += a; if (cg==='expense') expense -= a;
+    if (dg==='income'){ income -= a; reversed.push({source:'Journal', date:it.date, label:it.narration||ledName(it.debit), amount:a, why:`debits the income ledger ${ledName(it.debit)}`}); }
+    if (cg==='income') income += a;
+    if (dg==='expense') expense += a;
+    if (cg==='expense'){ expense -= a; reversed.push({source:'Journal', date:it.date, label:it.narration||ledName(it.credit), amount:a, why:`credits the expense ledger ${ledName(it.credit)}`}); }
   });
   ((receiptsData&&receiptsData.items)||[]).forEach(it=>{
     const g = groupOf(it.ledger); const a = num(it.amount);
-    if (g==='income') income += a; if (g==='expense') expense -= a;
+    if (g==='income') income += a;
+    if (g==='expense'){ expense -= a; reversed.push({source:'Receipt', date:it.date, label:receiptFromLabel(it), amount:a, why:`credits the expense ledger ${ledName(it.ledger)}`}); }
   });
   ((paymentsData&&paymentsData.items)||[]).forEach(it=>{
     const g = groupOf(it.ledger); const a = num(it.amount);
-    if (g==='expense') expense += a; if (g==='income') income -= a;
+    if (g==='expense') expense += a;
+    if (g==='income'){ income -= a; reversed.push({source:'Payment', date:it.date, label:it.party||it.item||'', amount:a, why:`debits the income ledger ${ledName(it.ledger)}`}); }
   });
-  return {income, expense};
+  return {income, expense, reversed};
 }
 
 function renderSetupLedgers(body){
@@ -3655,6 +3680,7 @@ function renderJournal(mount){
         <div class="field"><button class="btn primary" id="jeSave" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Post entry</button></div>
       </div>
       <div class="hint" style="color:var(--text-faint);font-size:12px;">Examples — Discount to a creditor: Dr <em>Discount allowed</em>, Cr <em>Creditor</em>. Advance to staff from till: Dr <em>Advance – Ravi</em>, Cr <em>Cash in hand</em>. Supplier bill payable: Dr <em>an Expense ledger</em>, Cr <em>Supplier payable</em>; when paid: Dr <em>Supplier payable</em>, Cr <em>Bank</em>. Interest credited by bank: Dr <em>Bank</em>, Cr <em>Interest income</em>.</div>
+      <div id="jeWarn" style="font-size:12.5px;margin-top:6px;color:var(--warning);"></div>
       <div id="jeMsg" style="font-size:13px;margin-top:4px;"></div>
     </div>
     <div class="section-head"><h2>Entries</h2><span id="jeMonthLabel"></span></div>
@@ -3665,6 +3691,18 @@ function renderJournal(mount){
       <tbody>${state.ledgers.length? state.ledgers.slice().sort((a,b)=>(a.name||'').localeCompare(b.name||'')).map(l=>`<tr><td>${esc(l.name)}</td><td>${esc((LEDGER_GROUPS[l.group]||{}).label||'')}</td><td class="num">${ledgerBalanceLabel(l.balance)}</td></tr>`).join('') : `<tr><td colspan="3" class="empty">No ledgers yet.</td></tr>`}</tbody>
     </table></div></div>
   `;
+  // Flags the reversed direction as the accounts are picked, before the entry is posted.
+  const jeCheck = ()=>{
+    const w = $('#jeWarn'); if (!w) return;
+    const grp = (k)=>{ if (!k || !k.startsWith('led:')) return null; const l = state.ledgers.find(x=>x.id===k.slice(4)); return l?l.group:null; };
+    const dg = grp($('#jeDebit').value), cg = grp($('#jeCredit').value);
+    const msgs = [];
+    if (cg==='expense') msgs.push('Crediting an expense ledger <strong>reduces</strong> that expense — to record a cost, put the expense ledger on the <strong>Debit</strong> side.');
+    if (dg==='income') msgs.push('Debiting an income ledger <strong>reduces</strong> that income — to record earnings, put the income ledger on the <strong>Credit</strong> side.');
+    w.innerHTML = msgs.join('<br>');
+  };
+  $('#jeDebit').addEventListener('change', jeCheck);
+  $('#jeCredit').addEventListener('change', jeCheck);
   $('#jeSave').onclick = addJournalEntry;
   loadJournalList();
 }
@@ -3832,6 +3870,7 @@ function renderReceipts(mount){
         <div class="field"><button class="btn primary" id="rcSave" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Save receipt</button></div>
       </div>
       <div class="hint" style="color:var(--text-faint);font-size:12px;">For "Other party", pick an <strong>Income</strong> ledger to count the receipt in the P&amp;L, or an <strong>Asset / Receivable</strong> ledger when it settles an amount that was owed. Leave it as "none" for a plain cash/bank receipt.</div>
+      <div id="rcWarn" style="font-size:12.5px;margin-top:6px;color:var(--warning);"></div>
       <div id="rcMsg" style="font-size:13px;margin-top:4px;"></div>
     </div>
     <div class="section-head"><h2>Receipts</h2><span id="rcMonthLabel"></span></div>
@@ -3844,6 +3883,15 @@ function renderReceipts(mount){
     $('#rcLedgerWrap').style.display = other ? '' : 'none';
   };
   $('#rcType').onchange = syncType; syncType();
+  const rcCheck = ()=>{
+    const w = $('#rcWarn'); if (!w) return;
+    const k = $('#rcLedger') ? $('#rcLedger').value : '';
+    const l = k.startsWith('led:') && state.ledgers.find(x=>x.id===k.slice(4));
+    w.innerHTML = (l && l.group==='expense')
+      ? 'Crediting an expense ledger <strong>reduces</strong> that expense and raises profit. For money earned, pick an <strong>Income</strong> ledger; for a refund of a cost, this is correct.'
+      : '';
+  };
+  if ($('#rcLedger')) $('#rcLedger').addEventListener('change', rcCheck);
   $('#rcSave').onclick = addReceipt;
   loadReceiptsList();
 }
