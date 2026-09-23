@@ -1753,10 +1753,12 @@ async function syncDutyExpenses(date, dutyId, expenseItems){
     const base = {id:e.id||uid(), date, description:desc, amount:num(e.amount), source:'duty', dutyId,
                   account:key, ledger: key.startsWith('cat:') ? '' : key, mode:'Cash', paidFrom:'',
                   subjectType:e.subjectType||'', subjectId:e.subjectId||'', subjectName:who};
-    // A staff payment is part of that month's salary cost, so it always counts as an expense —
-    // the salary sheet's net pay drops by the same advance, leaving the total salary cost unchanged.
-    return (isExpenseLine(key) || who)
-      ? Object.assign(base, {kind:'expense', category: who ? `${label} — ${who}` : label})
+    // An advance handed to a staff member is money owed back until their salary falls due, so it is
+    // a payment against that person — never an expense. The month's salary cost reaches the P&L
+    // through the salary sheet instead.
+    if (who) return Object.assign(base, {kind:'payment', party:who, item:'Staff advance', category:`${label} — ${who}`});
+    return isExpenseLine(key)
+      ? Object.assign(base, {kind:'expense', category:label})
       : Object.assign(base, {kind:'payment', party:label, item:'Other payment', category:label});
   });
   data.items = kept.concat(mine);
@@ -2768,7 +2770,7 @@ async function computeReport(from, to, f){
   const r = { from, to, days:daysBetween(from,to), revenue:0, fuelRevenue:0, oilRevenue:0, liters:0,
     byProduct:{p1:{liters:0,amount:0}, p2:{liters:0,amount:0}, p3:{liters:0,amount:0}}, byDay:{},
     payTotals: entryFiltered ? null : {pos:0, upi:0, hpCard:0, credit:0, cash:0, expenses:0},
-    duties:[], creditSales:[], oils:[], purchases:[], oilPurchases:[], expenses:[], payments:[], salaryRows:[], salary:0, journal:[], receipts:[], nozzleRows:[] };
+    duties:[], creditSales:[], oils:[], purchases:[], oilPurchases:[], expenses:[], payments:[], salaryRows:[], salary:0, salaryPaid:0, salaryAdvance:0, journal:[], receipts:[], nozzleRows:[] };
   dayDocs.forEach(doc=>{
     Object.entries(doc.duties||{}).forEach(([dutyId,x])=>{
       if (f.staff && x.staffId!==f.staff) return;
@@ -2809,7 +2811,10 @@ async function computeReport(from, to, f){
     ((rc&&rc.items)||[]).forEach(it=>{ if (inRange(it.date) && (!f.creditor || it.creditorId===f.creditor)) r.receipts.push(it); });
     // Salary is a monthly sheet — a month counts when any part of it falls in the range.
     const sal = await getMonthDoc('salaryMonthly', m);
-    if (sal && sal.staff){ Object.entries(sal.staff).forEach(([sid,s])=>{ if (!f.staff || sid===f.staff){ r.salaryRows.push(Object.assign({month:m}, s)); r.salary += num(s.netPaid); } }); }
+    // Salary is the cost EARNED in the month (base less any deduction), not what was handed over:
+    // an advance already paid out is a prepayment, and the balance is still owed. Both sit on the
+    // balance sheet, so the P&L carries the full month's salary either way.
+    if (sal && sal.staff){ Object.entries(sal.staff).forEach(([sid,s])=>{ if (!f.staff || sid===f.staff){ r.salaryRows.push(Object.assign({month:m}, s)); r.salary += Math.max(0, num(s.baseSalary) - num(s.deduction)); r.salaryPaid += num(s.netPaid); r.salaryAdvance += num(s.advance); } }); }
   }
   r.fuelCost = r.purchases.reduce((s,i)=>s+num(i.amount),0);
   r.oilPurchaseCost = r.oilPurchases.reduce((s,i)=>s+num(i.amount),0);
@@ -3219,7 +3224,7 @@ function renderReportBody(body, cfg, r, c){
       ${kpi('Opening stock', r.openingStock.totalValue, P2(c,'openingStock'), fmtDateLabel(r.openingStock.date)+' · '+stockQtyNote(r.openingStock))}
       ${kpi('Closing stock', r.closingStock.totalValue, P2(c,'closingStock'), fmtDateLabel(r.closingStock.date)+' · '+stockQtyNote(r.closingStock))}
       ${kpi('Gross P&L', r.grossMargin, P('grossMargin'), 'sales + closing − opening − purchases', {signColor:true})}
-      ${kpi('Expenses', r.totalExpenses, P('totalExpenses'), `running ${moneyShort(r.expenseTotal)} · salary ${moneyShort(r.salary)} · other ${moneyShort(r.otherExpense)}`, {lowerIsBetter:true})}
+      ${kpi('Expenses', r.totalExpenses, P('totalExpenses'), `running ${moneyShort(r.expenseTotal)} · salary ${moneyShort(r.salary)} (earned) · other ${moneyShort(r.otherExpense)}`, {lowerIsBetter:true})}
       ${kpi('Other income', r.otherIncome, P('otherIncome'), 'journal + receipts')}
       ${kpi('Net P&L', r.net, P('net'), 'gross + other income − expenses', {signColor:true})}
       ${kpi('Fuel liters', r.liters, P('liters'), '', {fmt:liters})}
@@ -3464,9 +3469,12 @@ function renderReportBody(body, cfg, r, c){
   }
   if (has('salary')){
     const rows = r.salaryRows.slice().sort((a,b)=>b.month.localeCompare(a.month) || (a.name||'').localeCompare(b.name||''));
-    parts.push(table('Salary', [{label:'Month'},{label:'Staff'},{label:'Base',num:true},{label:'Advance',num:true},{label:'Deduction',num:true},{label:'Net',num:true},{label:'Status'}],
-      rows.map(s=>[monthLabel(s.month), esc(s.name), money(s.baseSalary), money(s.advance), money(s.deduction), money(s.netPaid), `<span class="pill ${s.status==='paid'?'good':'neutral'}">${s.status==='paid'?'Paid':'Pending'}</span>`]),
-      ['Total','','','','', money(r.salary), '']));
+    parts.push(table('Salary', [{label:'Month'},{label:'Staff'},{label:'Base',num:true},{label:'Advance paid',num:true},{label:'Deduction',num:true},{label:'Cost to P&L',num:true},{label:'Still to pay',num:true},{label:'Status'}],
+      rows.map(s=>[monthLabel(s.month), esc(s.name), money(s.baseSalary), money(s.advance), money(s.deduction),
+        money(Math.max(0, num(s.baseSalary)-num(s.deduction))), money(s.netPaid),
+        `<span class="pill ${s.status==='paid'?'good':'neutral'}">${s.status==='paid'?'Paid':'Pending'}</span>`]),
+      ['Total','', money(rows.reduce((a,s)=>a+num(s.baseSalary),0)), money(r.salaryAdvance), money(rows.reduce((a,s)=>a+num(s.deduction),0)), money(r.salary), money(r.salaryPaid), '']));
+    parts.push(`<div class="hint" style="color:var(--text-faint);font-size:12px;margin:-4px 0 4px;">The P&amp;L carries the salary <strong>earned</strong> in the month (base less deductions). An advance handed out from the till is a prepayment — it reduces what is still to pay, not the cost.</div>`);
   }
   if (has('journal')){
     const rows = r.journal.slice().sort(sortD);
@@ -3661,7 +3669,7 @@ function exportReportExcel(rep){
   ], [26, 22, 12, 16, 20, 18, 16]);
   if (has('expenses')) addSheet('Expenses', [['Date', 'Category', 'Description', 'Source', 'Amount (₹)'], ...r.expenses.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, it.category||'', it.description||'', it.source==='duty'?'Duty till':'Manual', r2(it.amount)])], [12, 22, 30, 10, 12]);
   if (has('payments')) addSheet('Payments', [['Date', 'Paid to', 'Payment for', 'Description', 'Mode', 'Paid from', 'Ledger', 'Amount (₹)'], ...r.payments.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, it.party||'', it.item||'', it.description||'', it.mode||'', paidFromLabel(it.paidFrom), targetLabel(it.ledger)||'', r2(it.amount)])], [12, 22, 20, 30, 12, 16, 22, 12]);
-  if (has('salary')) addSheet('Salary', [['Month', 'Staff', 'Wage type', 'Hours', 'Base (₹)', 'Advance (₹)', 'Deduction (₹)', 'Net (₹)', 'Status', 'Paid date'], ...r.salaryRows.map(s=>[s.month, s.name, s.wageType||'monthly', s.hoursWorked!=null?r2(s.hoursWorked):'', r2(s.baseSalary), r2(s.advance), r2(s.deduction), r2(s.netPaid), s.status||'', s.paidDate||''])], [10, 18, 10, 8, 12, 12, 13, 12, 9, 12]);
+  if (has('salary')) addSheet('Salary', [['Month', 'Staff', 'Wage type', 'Hours', 'Base (₹)', 'Advance paid (₹)', 'Deduction (₹)', 'Cost to P&L (₹)', 'Still to pay (₹)', 'Status', 'Paid date'], ...r.salaryRows.map(s=>[s.month, s.name, s.wageType||'monthly', s.hoursWorked!=null?r2(s.hoursWorked):'', r2(s.baseSalary), r2(s.advance), r2(s.deduction), r2(Math.max(0,num(s.baseSalary)-num(s.deduction))), r2(s.netPaid), s.status||'', s.paidDate||''])], [10, 18, 10, 8, 12, 15, 13, 16, 15, 9, 12]);
   if (has('journal')) addSheet('Journal', [['Date', 'Debit (Dr)', 'Credit (Cr)', 'Amount (₹)', 'Narration', 'By'], ...r.journal.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, targetLabel(it.debit)||it.debitLabel||'', targetLabel(it.credit)||it.creditLabel||'', r2(it.amount), it.narration||'', it.by||''])], [12, 28, 28, 12, 36, 14]);
   if (has('receipts')) addSheet('Receipts', [['Date', 'From', 'Type', 'Amount (₹)', 'Into', 'Mode', 'Reference', 'Narration', 'Ledger', 'By'], ...r.receipts.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, receiptFromLabel(it), it.type==='creditor'?'Creditor':'Other', r2(it.amount), it.into==='cash'?'Cash in hand':((state.accounts.find(a=>'acct:'+a.id===it.into)||{}).name||''), it.mode||'', it.reference||'', it.narration||'', targetLabel(it.ledger)||'', it.by||''])], [12, 24, 10, 12, 18, 12, 14, 30, 22, 14]);
   if (has('stock')) addSheet('Oil stock', [
@@ -3879,6 +3887,9 @@ function journalPL(journalData, receiptsData, paymentsData){
     if (g==='expense'){ expense -= a; reversed.push({source:'Receipt', date:it.date, label:receiptFromLabel(it), amount:a, why:`credits the expense ledger ${ledName(it.ledger)}`}); }
   });
   ((paymentsData&&paymentsData.items)||[]).forEach(it=>{
+    // A staff advance is a prepayment whatever ledger it was posted to — the cost is recognised on
+    // the salary sheet when the salary falls due, so it never reaches the P&L here.
+    if (it.subjectType==='staff') return;
     const g = groupOf(it.ledger); const a = num(it.amount);
     if (g==='expense') expense += a;
     if (g==='income'){ income -= a; reversed.push({source:'Payment', date:it.date, label:it.party||it.item||'', amount:a, why:`debits the income ledger ${ledName(it.ledger)}`}); }
