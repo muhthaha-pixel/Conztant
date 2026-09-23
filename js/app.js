@@ -2909,6 +2909,24 @@ function buildLedgerPostings(r){
   p.sort((a,b)=>a.date.localeCompare(b.date));
   return p;
 }
+// Only today's balances are stored, so a period's opening and closing are derived: wind the live
+// balance back over everything posted after the period ends to get the closing, then back over the
+// period's own movement to get the opening. Reports ending today skip the first step entirely.
+async function ledgerPeriodBalances(r){
+  const movementAfter = {};
+  if (r.to < todayStr()){
+    const trailing = await computeReport(addDays(r.to, 1), todayStr(), {});
+    buildLedgerPostings(trailing).forEach(p=>{ movementAfter[p.key] = (movementAfter[p.key]||0) + p.dr - p.cr; });
+  }
+  const movementIn = {};
+  buildLedgerPostings(r).forEach(p=>{ movementIn[p.key] = (movementIn[p.key]||0) + p.dr - p.cr; });
+  const out = {};
+  ledgerAccountList().forEach(a=>{
+    const closing = num(a.balance) - (movementAfter[a.key]||0);
+    out[a.key] = {closing, opening: closing - (movementIn[a.key]||0), movement: movementIn[a.key]||0};
+  });
+  return out;
+}
 function ledgerStatements(r, pick){
   const postings = buildLedgerPostings(r);
   const accounts = ledgerAccountList();
@@ -2920,11 +2938,14 @@ function ledgerStatements(r, pick){
     else list = accounts.filter(a=>a.key===pick);
   }
   // With "all", skip accounts that had no movement and carry no balance, so the report stays readable.
+  const bal = r.periodBalances || {};
   return list.map(a=>{
     const rows = (byKey[a.key]||[]);
     const dr = rows.reduce((s,x)=>s+x.dr,0), cr = rows.reduce((s,x)=>s+x.cr,0);
-    return Object.assign({}, a, {rows, dr, cr, movement:dr-cr});
-  }).filter(a=> (pick && pick!=='all' && !pick.startsWith('grp:')) ? true : (a.rows.length || num(a.balance)));
+    const b = bal[a.key] || {};
+    return Object.assign({}, a, {rows, dr, cr, movement:dr-cr,
+      opening: b.opening!=null ? b.opening : null, closing: b.closing!=null ? b.closing : num(a.balance)});
+  }).filter(a=> (pick && pick!=='all' && !pick.startsWith('grp:')) ? true : (a.rows.length || num(a.balance) || num(a.opening)));
 }
 // ---- stock valuation ---------------------------------------------------------------------
 // Fuel in a tank is valued at the most recent purchase rate for that tank, falling back to the
@@ -3161,6 +3182,8 @@ async function runReport(exportAfter){
   body.innerHTML = `<div class="card empty">Crunching the numbers…</div>`;
   const filters = {staff:cfg.staff, product:cfg.product, nozzle:cfg.nozzle, creditor:cfg.creditor, method:cfg.method, basis:cfg.basis};
   const main = await computeReport(cfg.from, cfg.to, filters);
+  // Opening / closing per account, used by the ledger, creditor and supplier sections.
+  main.periodBalances = await ledgerPeriodBalances(main);
   const cmpRange = comparisonRange(cfg.from, cfg.to, cfg.compare);
   const cmp = cmpRange ? await computeReport(cmpRange.from, cmpRange.to, filters) : null;
   lastReport = {cfg:Object.assign({}, cfg), main, cmp};
@@ -3376,13 +3399,16 @@ function renderReportBody(body, cfg, r, c){
     const list = state.creditors.filter(c=> cfg.creditor ? c.id===cfg.creditor : true);
     const rows = list.map(c=>{
       const sold = soldTo[c.id]||0, recd = recdFrom[c.id]||0, jnl = jnlTo[c.id]||0;
-      const closing = num(c.balance);
-      const opening = closing - sold + recd - jnl;
+      // Closing is the balance at the period's end (today's balance wound back over anything posted
+      // since), and opening is that less the period's own movement.
+      const pb = (r.periodBalances||{})['cred:'+c.id];
+      const closing = pb ? pb.closing : num(c.balance);
+      const opening = pb ? pb.opening : (closing - sold + recd - jnl);
       const overLimit = num(c.creditLimit) && closing > num(c.creditLimit);
       return {c, sold, recd, jnl, opening, closing, overLimit};
     });
     const t = (k)=>rows.reduce((s,x)=>s+num(x[k]),0);
-    parts.push(table('Creditor balances', [{label:'Creditor'},{label:'Phone'},{label:'Opening',num:true},{label:'Credit sales',num:true},{label:'Received',num:true},{label:'Outstanding now',num:true},{label:'Credit limit',num:true},{label:'Status'}],
+    parts.push(table('Creditor balances', [{label:'Creditor'},{label:'Phone'},{label:'Opening',num:true},{label:'Credit sales',num:true},{label:'Received',num:true},{label:'Closing',num:true},{label:'Credit limit',num:true},{label:'Status'}],
       rows.map(x=>[
         esc(x.c.name) + (x.c.isBowser?' <span class="hint" style="color:var(--text-faint);">(bowser)</span>':'') + (num(ltrTo[x.c.id])?`<div class="hint" style="font-size:11px;color:var(--text-faint)">${liters(ltrTo[x.c.id])} taken</div>`:''),
         esc(x.c.phone||'—'), money(x.opening), money(x.sold), money(x.recd),
@@ -3392,7 +3418,7 @@ function renderReportBody(body, cfg, r, c){
       ]),
       ['Total','', money(t('opening')), money(t('sold')), money(t('recd')), money(t('closing')), '', '']));
     const due = rows.filter(x=>x.closing>0).length, over = rows.filter(x=>x.overLimit).length;
-    parts.push(`<div class="hint" style="color:var(--text-faint);font-size:12px;margin:-4px 0 4px;">${rows.length} creditor(s) · ${due} with dues · ${over} over their credit limit. Opening is derived from the current balance less this period's movement; a per-creditor statement with every transaction is under the <strong>Ledger statements</strong> report.</div>`);
+    parts.push(`<div class="hint" style="color:var(--text-faint);font-size:12px;margin:-4px 0 4px;">${rows.length} creditor(s) · ${due} with dues · ${over} over their credit limit. Opening and closing are the balances at the start and end of the period, derived by winding today's balance back over everything posted since. A per-creditor statement with every transaction is under the <strong>Ledger statements</strong> report.</div>`);
   }
   if (has('credit')){
     const rows = r.creditSales.slice().sort(sortD);
@@ -3478,9 +3504,18 @@ function renderReportBody(body, cfg, r, c){
     const purchasedBySup = {}, paidBySup = {};
     r.purchases.forEach(it=>{ if (it.supplierId) purchasedBySup[it.supplierId] = (purchasedBySup[it.supplierId]||0) + num(it.amount); });
     r.payments.forEach(it=>{ if ((it.ledger||'').startsWith('sup:')) { const id = it.ledger.slice(4); paidBySup[id] = (paidBySup[id]||0) + num(it.amount); } });
-    parts.push(table('Supplier balances', [{label:'Supplier'},{label:'Phone'},{label:'Opening',num:true},{label:'Purchased (period)',num:true},{label:'Paid (period)',num:true},{label:'Outstanding now',num:true}],
-      state.suppliers.map(s=>[esc(s.name), esc(s.phone||'—'), money(s.openingBalance||0), money(purchasedBySup[s.id]||0), money(paidBySup[s.id]||0), money(s.balance||0)]),
-      ['Total','','', money(Object.values(purchasedBySup).reduce((a,b)=>a+b,0)), money(Object.values(paidBySup).reduce((a,b)=>a+b,0)), money(state.suppliers.reduce((a,s)=>a+num(s.balance),0))]));
+    // Supplier keys hold a debit-positive balance, so a payable reads as negative there — flip it
+    // back to "what we owe" for display.
+    const supBal = (id, which)=>{ const pb = (r.periodBalances||{})['sup:'+id]; return pb ? -num(pb[which]) : null; };
+    const rows = state.suppliers.map(s=>{
+      const closing = supBal(s.id,'closing')!=null ? supBal(s.id,'closing') : num(s.balance);
+      const opening = supBal(s.id,'opening')!=null ? supBal(s.id,'opening') : (closing - (purchasedBySup[s.id]||0) + (paidBySup[s.id]||0));
+      return {s, opening, closing};
+    });
+    const t = (k)=>rows.reduce((a,x)=>a+num(x[k]),0);
+    parts.push(table('Supplier balances', [{label:'Supplier'},{label:'Phone'},{label:'Opening',num:true},{label:'Purchased (period)',num:true},{label:'Paid (period)',num:true},{label:'Closing',num:true}],
+      rows.map(x=>[esc(x.s.name), esc(x.s.phone||'—'), money(x.opening), money(purchasedBySup[x.s.id]||0), money(paidBySup[x.s.id]||0), `<strong>${money(x.closing)}</strong>`]),
+      ['Total','', money(t('opening')), money(Object.values(purchasedBySup).reduce((a,b)=>a+b,0)), money(Object.values(paidBySup).reduce((a,b)=>a+b,0)), money(t('closing'))]));
   }
   if (has('ledger')){
     const pick = cfg.ledgerPick || 'all';
@@ -3489,25 +3524,30 @@ function renderReportBody(body, cfg, r, c){
     stmts.forEach(s=>{ (groups[s.group] = groups[s.group]||[]).push(s); });
     const groupLabel = (k)=>(ledgerGroupKeys().find(g=>g.key===k)||{}).label||k;
     parts.push(`<div class="section-head"><h2>Ledger statements</h2><span class="hint">${stmts.length} account${stmts.length===1?'':'s'} · period transactions with running total</span></div>
-      <div class="banner info">${icon('book')}<div>Each statement lists this period's transactions with a running total, then the account's <strong>current balance</strong> (all-time, as of now). Dr = value received by the account, Cr = value given.</div></div>`);
+      <div class="banner info">${icon('book')}<div>Each statement opens with the balance brought forward, lists the period's transactions with a running total, and closes with the balance at the period end — today's balance is also shown when it has moved since. Dr = value received by the account, Cr = value given.</div></div>`);
     // Group summary first, then a statement per account.
-    parts.push(table('Group summary', [{label:'Group'},{label:'Accounts',num:true},{label:'Debits',num:true},{label:'Credits',num:true},{label:'Net movement',num:true}],
-      Object.entries(groups).map(([g,list])=>[esc(groupLabel(g)), list.length, money(list.reduce((s,x)=>s+x.dr,0)), money(list.reduce((s,x)=>s+x.cr,0)), money(list.reduce((s,x)=>s+x.movement,0))]),
-      ['Total', stmts.length, money(stmts.reduce((s,x)=>s+x.dr,0)), money(stmts.reduce((s,x)=>s+x.cr,0)), money(stmts.reduce((s,x)=>s+x.movement,0))]));
+    const sum = (list, k)=>list.reduce((s,x)=>s+num(x[k]),0);
+    parts.push(table('Group summary', [{label:'Group'},{label:'Accounts',num:true},{label:'Opening',num:true},{label:'Debits',num:true},{label:'Credits',num:true},{label:'Net movement',num:true},{label:'Closing',num:true}],
+      Object.entries(groups).map(([g,list])=>[esc(groupLabel(g)), list.length, ledgerBalanceLabel(sum(list,'opening')), money(sum(list,'dr')), money(sum(list,'cr')), money(sum(list,'movement')), ledgerBalanceLabel(sum(list,'closing'))]),
+      ['Total', stmts.length, ledgerBalanceLabel(sum(stmts,'opening')), money(sum(stmts,'dr')), money(sum(stmts,'cr')), money(sum(stmts,'movement')), ledgerBalanceLabel(sum(stmts,'closing'))]));
     Object.entries(groups).forEach(([g,list])=>{
       parts.push(`<div class="section-head"><h2 style="font-size:14px;">${esc(groupLabel(g))}</h2></div>`);
       list.forEach(a=>{
-        let run = 0;
+        // The running column starts at the opening balance, so the last row is the closing balance.
+        let run = num(a.opening);
         const rows = a.rows.map(x=>{ run += x.dr - x.cr; return [fmtDateLabel(x.date), esc(x.particulars), esc(x.ref||'—'), x.dr?money(x.dr):'—', x.cr?money(x.cr):'—', ledgerBalanceLabel(run)]; });
         parts.push(`<div class="card card-pad" style="margin-bottom:12px;">
           <div class="row" style="justify-content:space-between;margin-bottom:8px;">
             <strong>${esc(a.label)}</strong>
-            <span class="hint" style="color:var(--text-muted);font-size:12.5px;">Period movement <strong class="mono">${money(a.movement)}</strong> · Current balance <strong class="mono">${ledgerBalanceLabel(a.balance)}</strong></span>
+            <span class="hint" style="color:var(--text-muted);font-size:12.5px;">Opening <strong class="mono">${ledgerBalanceLabel(a.opening)}</strong> · Closing <strong class="mono">${ledgerBalanceLabel(a.closing)}</strong>${num(a.balance)!==num(a.closing)?` · Today <strong class="mono">${ledgerBalanceLabel(a.balance)}</strong>`:''}</span>
           </div>
           <div class="table-wrap"><table>
             <thead><tr><th>Date</th><th>Particulars</th><th>Ref</th><th class="num">Debit</th><th class="num">Credit</th><th class="num">Running</th></tr></thead>
-            <tbody>${rows.length? rows.map(row=>`<tr>${row.map((v,i)=>`<td class="${i>=3?'num':''}">${v}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="6" class="empty">No transactions in this period.</td></tr>`}</tbody>
-            ${rows.length?`<tfoot><tr><td colspan="3" style="font-weight:700;">Total</td><td class="num" style="font-weight:700;">${money(a.dr)}</td><td class="num" style="font-weight:700;">${money(a.cr)}</td><td class="num" style="font-weight:700;">${money(a.movement)}</td></tr></tfoot>`:''}
+            <tbody>
+              <tr><td colspan="3" style="font-style:italic;color:var(--text-muted);">Opening balance — ${esc(fmtDateLabel(r.from))}</td><td class="num">${num(a.opening)>0?money(a.opening):'—'}</td><td class="num">${num(a.opening)<0?money(-a.opening):'—'}</td><td class="num">${ledgerBalanceLabel(a.opening)}</td></tr>
+              ${rows.length? rows.map(row=>`<tr>${row.map((v,i)=>`<td class="${i>=3?'num':''}">${v}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="6" class="empty">No transactions in this period.</td></tr>`}
+            </tbody>
+            <tfoot><tr><td colspan="3" style="font-weight:700;">Closing balance</td><td class="num" style="font-weight:700;">${money(a.dr)}</td><td class="num" style="font-weight:700;">${money(a.cr)}</td><td class="num" style="font-weight:700;">${ledgerBalanceLabel(a.closing)}</td></tr></tfoot>
           </table></div>
         </div>`);
       });
@@ -3636,28 +3676,42 @@ function exportReportExcel(rep){
     ...state.creditors.filter(c=>c.isBowser).map(c=>[c.name, state.config.products[c.bowserProduct]||c.bowserProduct||'', r2(c.bowserCapacityL), r2(c.bowserStockL), r2(c.balance)]),
   ], [20, 16, 14, 16, 10]);
   if (has('creditors')) addSheet('Creditors', [
-    ['Creditor', 'Phone', 'Vehicle', 'Credit limit (₹)', 'Outstanding (₹)', 'Bowser stock (L)', 'Status'],
-    ...state.creditors.filter(c=>cfg.creditor?c.id===cfg.creditor:true).map(c=>[c.name, c.phone||'', c.vehicleNo||'', r2(c.creditLimit), r2(c.balance), c.isBowser?r2(c.bowserStockL):'', num(c.creditLimit)&&num(c.balance)>num(c.creditLimit)?'Over limit':(num(c.balance)>0?'Due':'Settled')]),
-    ['Total', '', '', '', r2(state.creditors.reduce((s,c)=>s+num(c.balance),0)), '', ''],
-  ], [24, 14, 14, 16, 18, 16, 12]);
+    ['Creditor', 'Phone', 'Vehicle', 'Credit limit (₹)', 'Opening (₹)', 'Credit sales (₹)', 'Received (₹)', 'Closing (₹)', 'Bowser stock (L)', 'Status'],
+    ...state.creditors.filter(c=>cfg.creditor?c.id===cfg.creditor:true).map(c=>{
+      const pb = (r.periodBalances||{})['cred:'+c.id] || {};
+      const closing = pb.closing!=null ? pb.closing : num(c.balance);
+      const sold = r.creditSales.filter(x=>x.creditorId===c.id).reduce((s,x)=>s+num(x.amount),0);
+      const recd = r.receipts.filter(x=>x.type==='creditor' && x.creditorId===c.id).reduce((s,x)=>s+num(x.amount),0);
+      return [c.name, c.phone||'', c.vehicleNo||'', r2(c.creditLimit), r2(pb.opening!=null?pb.opening:closing-sold+recd), r2(sold), r2(recd), r2(closing), c.isBowser?r2(c.bowserStockL):'',
+        num(c.creditLimit)&&closing>num(c.creditLimit)?'Over limit':(closing>0?'Due':'Settled')];
+    }),
+  ], [24, 14, 14, 16, 16, 16, 16, 16, 16, 12]);
   if (has('suppliers')) addSheet('Suppliers', [
-    ['Supplier', 'Phone', 'Opening (₹)', 'Outstanding now (₹)', 'Notes'],
-    ...state.suppliers.map(s=>[s.name, s.phone||'', r2(s.openingBalance), r2(s.balance), s.notes||'']),
-  ], [24, 14, 14, 18, 30]);
+    ['Supplier', 'Phone', 'Opening (₹)', 'Purchased (₹)', 'Paid (₹)', 'Closing (₹)', 'Notes'],
+    ...state.suppliers.map(s=>{
+      const pb = (r.periodBalances||{})['sup:'+s.id] || {};
+      const closing = pb.closing!=null ? -num(pb.closing) : num(s.balance);
+      const purchased = r.purchases.filter(x=>x.supplierId===s.id).reduce((a,x)=>a+num(x.amount),0)
+        + r.oilPurchases.filter(x=>x.supplierId===s.id).reduce((a,x)=>a+num(x.amount),0);
+      const paid = r.payments.filter(x=>x.ledger==='sup:'+s.id).reduce((a,x)=>a+num(x.amount),0);
+      return [s.name, s.phone||'', r2(pb.opening!=null?-num(pb.opening):closing-purchased+paid), r2(purchased), r2(paid), r2(closing), s.notes||''];
+    }),
+  ], [24, 14, 16, 16, 16, 16, 30]);
   if (has('ledger')){
     const stmts = ledgerStatements(r, cfg.ledgerPick||'all');
     const groupLabel = (k)=>(ledgerGroupKeys().find(g=>g.key===k)||{}).label||k;
     const rows = [['Group', 'Account', 'Date', 'Particulars', 'Ref', 'Debit (₹)', 'Credit (₹)', 'Running (₹)']];
     stmts.forEach(a=>{
-      let run = 0;
+      let run = num(a.opening);
+      rows.push([groupLabel(a.group), a.label, r.from, 'OPENING BALANCE', '', '', '', r2(run)]);
       a.rows.forEach(x=>{ run += x.dr - x.cr; rows.push([groupLabel(a.group), a.label, x.date, x.particulars, x.ref||'', r2(x.dr), r2(x.cr), r2(run)]); });
-      rows.push([groupLabel(a.group), a.label, '', 'TOTAL / current balance', '', r2(a.dr), r2(a.cr), r2(a.balance)], []);
+      rows.push([groupLabel(a.group), a.label, r.to, 'CLOSING BALANCE', '', r2(a.dr), r2(a.cr), r2(a.closing)], []);
     });
     addSheet('Ledger', rows, [22, 26, 12, 40, 14, 14, 14, 16]);
     addSheet('Ledger summary', [
-      ['Group', 'Account', 'Debits (₹)', 'Credits (₹)', 'Net movement (₹)', 'Current balance (₹)'],
-      ...stmts.map(a=>[groupLabel(a.group), a.label, r2(a.dr), r2(a.cr), r2(a.movement), r2(a.balance)]),
-    ], [22, 26, 14, 14, 18, 20]);
+      ['Group', 'Account', 'Opening (₹)', 'Debits (₹)', 'Credits (₹)', 'Net movement (₹)', 'Closing (₹)', 'Balance today (₹)'],
+      ...stmts.map(a=>[groupLabel(a.group), a.label, r2(a.opening), r2(a.dr), r2(a.cr), r2(a.movement), r2(a.closing), r2(a.balance)]),
+    ], [22, 26, 16, 14, 14, 18, 16, 18]);
   }
   if (has('balances')) addSheet('Balances', [
     ['Ledgers', 'Group', 'Balance (₹, Dr +/Cr −)'],
