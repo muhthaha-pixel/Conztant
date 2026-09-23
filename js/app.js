@@ -351,7 +351,7 @@ const state = {
   db: null,
   dbReady: false,
   config: { stationName:'Conztant Petroleum Retailers', products:{p1:'Petrol (MS)',p2:'Diesel (HSD)',p3:'Power / XP'} },
-  tanks: [], nozzles: [], staff: [], creditors: [], suppliers: [], accounts: [], ledgers: [], oilProducts: [],
+  tanks: [], nozzles: [], staff: [], creditors: [], suppliers: [], accounts: [], ledgers: [], oilProducts: [], fixedCosts: [],
   users: [], usersLoaded: false, currentUser: null,
   ratesFlat: {},        // 'YYYY-MM-DD' -> {p1,r2,p3}
   ratesLoadedMonths: new Set(),
@@ -427,6 +427,11 @@ function subscribeMasters(){
 
   db.collection('accounts').onSnapshot(qs=>{
     state.accounts = qs.docs.map(d=>Object.assign({id:d.id}, d.data()));
+    refreshView();
+  }, ()=>{});
+
+  db.collection('fixedCosts').onSnapshot(qs=>{
+    state.fixedCosts = qs.docs.map(d=>Object.assign({id:d.id}, d.data()));
     refreshView();
   }, ()=>{});
 
@@ -2662,7 +2667,7 @@ function reportSections(cfg){
 }
 const REPORT_CFG_KEY = 'fuelLedgerReportCfg';
 function defaultReportCfg(){
-  return { report:'full', preset:'thisMonth', from:'', to:'', compare:'none', staff:'', product:'', nozzle:'', creditor:'', method:'', ledgerPick:'all' };
+  return { report:'full', basis:'cash', preset:'thisMonth', from:'', to:'', compare:'none', staff:'', product:'', nozzle:'', creditor:'', method:'', ledgerPick:'all' };
 }
 let repCfg = null;
 function loadReportCfg(){
@@ -2781,7 +2786,25 @@ async function computeReport(from, to, f){
   r.purchaseTotal = r.fuelCost + r.oilPurchaseCost;
   r.stockRates = await latestPurchaseRates(to);
   r.stockValue = stockValuation(r.stockRates);
-  r.expenseTotal = r.expenses.reduce((s,i)=>s+num(i.amount),0);
+  // Accrual basis: each fixed cost contributes its share of the period, and the actual payments
+  // settling those costs step out of the P&L so the charge is never counted twice. What was really
+  // paid is kept alongside, so the report can show whether the station is ahead or behind on each.
+  r.basis = f.basis==='accrual' ? 'accrual' : 'cash';
+  const schedule = state.fixedCosts.filter(fc=>fc.active!==false);
+  r.fixedLines = schedule.map(fc=>{
+    const accrued = accrueFixedCost(fc, from, to);
+    const paid = r.expenses.concat(r.payments).filter(it=>matchesFixedCost(fc, it)).reduce((s,it)=>s+num(it.amount),0);
+    return {id:fc.id, name:fc.name, account:fixedCostAccountLabel(fc), frequency:fc.frequency, perMonth:fixedMonthlyAmount(fc), accrued, paid, diff:paid-accrued};
+  });
+  r.fixedAccrued = r.fixedLines.reduce((s,x)=>s+x.accrued,0);
+  r.fixedPaid = r.fixedLines.reduce((s,x)=>s+x.paid,0);
+  if (r.basis==='accrual' && schedule.length){
+    r.expensesSettlingFixed = r.expenses.filter(it=>schedule.some(fc=>matchesFixedCost(fc, it)));
+    r.expenses = r.expenses.filter(it=>!schedule.some(fc=>matchesFixedCost(fc, it)));
+  } else {
+    r.expensesSettlingFixed = [];
+  }
+  r.expenseTotal = r.expenses.reduce((s,i)=>s+num(i.amount),0) + (r.basis==='accrual' ? r.fixedAccrued : 0);
   const pl = journalPL({items:r.journal}, {items:r.receipts}, {items:r.payments});
   r.otherIncome = pl.income; r.otherExpense = pl.expense; r.reversedPostings = pl.reversed;
 
@@ -3042,6 +3065,10 @@ async function renderReports(mount){
         </select></div>
         <div class="field"><label>From</label><input type="date" id="rpFrom" value="${cfg.from||''}" max="${todayStr()}"></div>
         <div class="field"><label>To</label><input type="date" id="rpTo" value="${cfg.to||''}" max="${todayStr()}"></div>
+        <div class="field"><label>Expense basis</label><select id="rpBasis">
+          <option value="cash" ${cfg.basis!=="accrual"?"selected":""}>As paid (cash)</option>
+          <option value="accrual" ${cfg.basis==="accrual"?"selected":""}>Accrued (spread fixed costs)</option>
+        </select></div>
         <div class="field"><label>Compare with</label><select id="rpCompare">
           ${[['none','No comparison'],['previous','Previous period'],['lastYear','Same period last year']].map(([v,l])=>`<option value="${v}" ${cfg.compare===v?'selected':''}>${l}</option>`).join('')}
         </select></div>
@@ -3083,6 +3110,7 @@ async function renderReports(mount){
   $('#rpFrom').onchange = (e)=>{ cfg.from = e.target.value; };
   $('#rpTo').onchange = (e)=>{ cfg.to = e.target.value; };
   $('#rpCompare').onchange = (e)=>{ cfg.compare = e.target.value; };
+  $('#rpBasis').onchange = (e)=>{ cfg.basis = e.target.value; };
   [['rpStaff','staff'],['rpProduct','product'],['rpNozzle','nozzle'],['rpCreditor','creditor'],['rpMethod','method']].forEach(([id,key])=>{ $('#'+id).onchange = (e)=>{ cfg[key] = e.target.value; }; });
 
 
@@ -3101,7 +3129,7 @@ async function runReport(exportAfter){
   if (!cfg.from || !cfg.to || cfg.from>cfg.to){ body.innerHTML = `<div class="card empty">Pick a valid From / To range.</div>`; return; }
   saveReportCfg();
   body.innerHTML = `<div class="card empty">Crunching the numbers…</div>`;
-  const filters = {staff:cfg.staff, product:cfg.product, nozzle:cfg.nozzle, creditor:cfg.creditor, method:cfg.method};
+  const filters = {staff:cfg.staff, product:cfg.product, nozzle:cfg.nozzle, creditor:cfg.creditor, method:cfg.method, basis:cfg.basis};
   const main = await computeReport(cfg.from, cfg.to, filters);
   const cmpRange = comparisonRange(cfg.from, cfg.to, cfg.compare);
   const cmp = cmpRange ? await computeReport(cmpRange.from, cmpRange.to, filters) : null;
@@ -3160,7 +3188,13 @@ function renderReportBody(body, cfg, r, c){
     // debit side. Each side is built as its own list and the two are paired row by row.
     const plDr = [], plCr = [];
     if (gross < 0) plDr.push(['To Gross Loss b/d', -gross]); else plCr.push(['By Gross Profit b/d', gross]);
-    plDr.push(['To Running expenses', r.expenseTotal], ['To Salary', r.salary], ['To Other expenses (journal)', r.otherExpense]);
+    // On the accrued basis the fixed charges are shown on their own line, so the split is visible.
+    if (r.basis==='accrual' && num(r.fixedAccrued)){
+      plDr.push(['To Fixed costs (accrued)', r.fixedAccrued], ['To Other running expenses', r.expenseTotal - r.fixedAccrued]);
+    } else {
+      plDr.push(['To Running expenses', r.expenseTotal]);
+    }
+    plDr.push(['To Salary', r.salary], ['To Other expenses (journal)', r.otherExpense]);
     plCr.push(['By Other income', r.otherIncome]);
     if (net >= 0) plDr.push(['To Net Profit', net]); else plCr.push(['By Net Loss', -net]);
     const plRows = Array.from({length: Math.max(plDr.length, plCr.length)}, (_, i)=>[plDr[i]||null, plCr[i]||null]);
@@ -3191,7 +3225,8 @@ function renderReportBody(body, cfg, r, c){
           <div style="font-size:12.5px;margin-top:6px;">Fix them in <strong>Journal</strong>, <strong>Receipts</strong> or <strong>Payments / Expenses</strong> — swap the debit and credit, or record a plain expense under Payments / Expenses instead.</div>
         </div></div>`;
       })()}
-      <div class="section-head"><h2>Trading Account</h2><span class="hint">${esc(rangeLabel(r.from, r.to))}</span></div>
+      ${r.basis==='accrual' ? `<div class="banner info">${icon('chart')}<div><strong>Accrued basis.</strong> Fixed costs are charged to this period by its share of each month — a full calendar month carries the whole amount, a part month its proportion — and the payments settling them are left out of the expense lines. Cash movement is unchanged; only the P&amp;L view differs.</div></div>` : ''}
+      <div class="section-head"><h2>Trading Account</h2><span class="hint">${esc(rangeLabel(r.from, r.to))}${r.basis==='accrual'?' · accrued basis':''}</span></div>
       <div class="card"><div class="table-wrap"><table>
         <thead><tr><th>Particulars (Dr)</th><th class="num">Amount</th><th>Particulars (Cr)</th><th class="num">Amount</th></tr></thead>
         <tbody>
@@ -3218,6 +3253,21 @@ function renderReportBody(body, cfg, r, c){
         <span class="hint" style="color:var(--text-faint);font-size:12px;">Stock is valued at cost — the purchase rate ruling on each date — across tanks, bowsers and lubricants.</span>
         <span class="pill ${net>=0?'good':'critical'}" style="font-size:13px;">${net>=0?'Net Profit':'Net Loss'} ${money(Math.abs(net))}</span>
       </div>`);
+    if ((r.fixedLines||[]).length){
+      // Accrued against actually paid, per charge — a positive difference means the station has paid
+      // ahead, a negative one that the charge is still owed for this period.
+      const accrued = r.basis==='accrual';
+      parts.push(`<div class="section-head"><h2>Fixed costs</h2><span class="hint">${accrued?'accrued into this P&amp;L':'shown for reference — this report is on the as-paid basis'}</span></div>`);
+      parts.push(table(accrued?'Accrued vs paid':'Fixed cost schedule', [{label:'Cost'},{label:'Charged to'},{label:'Per month',num:true},{label:'Accrued for period',num:true},{label:'Actually paid',num:true},{label:'Difference',num:true},{label:'Position'}],
+        r.fixedLines.map(x=>[esc(x.name), esc(x.account), money(x.perMonth), money(x.accrued), money(x.paid), money(x.diff),
+          Math.abs(x.diff)<1 ? '<span class="pill good">in line</span>'
+            : (x.diff>0 ? `<span class="pill neutral">paid ahead</span>` : `<span class="pill warning">still to pay</span>`)]),
+        ['Total','','', money(r.fixedAccrued), money(r.fixedPaid), money(r.fixedPaid-r.fixedAccrued), '']));
+      if (accrued && (r.expensesSettlingFixed||[]).length)
+        parts.push(`<div class="hint" style="color:var(--text-faint);font-size:12px;margin:-4px 0 4px;">${r.expensesSettlingFixed.length} payment(s) totalling ${money(r.expensesSettlingFixed.reduce((s,i)=>s+num(i.amount),0))} settle these charges and are excluded from the expense lines above, so nothing is counted twice.</div>`);
+      else if (!accrued && r.fixedLines.some(x=>Math.abs(x.diff)>1))
+        parts.push(`<div class="hint" style="color:var(--text-faint);font-size:12px;margin:-4px 0 4px;">Switch <strong>Expense basis</strong> to <em>Accrued</em> above to charge each of these to the period it belongs to instead of the date it was paid.</div>`);
+    }
     if (c){
       // Period-on-period comparison of the same lines, since the T-format itself holds one period.
       const cmpLine = (label, cur, prev, lower)=>[label, money(cur), money(prev), deltaPill(cur, prev, {lowerIsBetter:lower})];
@@ -3467,7 +3517,7 @@ function exportReportExcel(rep){
     if (has('summary')){
       // Trading and P&L accounts in the same two-sided layout as the screen.
       const g = num(r.grossMargin), n = num(r.net);
-      rows.push(['TRADING ACCOUNT — '+label], ['Particulars (Dr)', 'Amount (₹)', 'Particulars (Cr)', 'Amount (₹)'],
+      rows.push(['TRADING ACCOUNT — '+label + (r.basis==='accrual'?' (accrued basis)':'')], ['Particulars (Dr)', 'Amount (₹)', 'Particulars (Cr)', 'Amount (₹)'],
         ['To Opening stock', r2(r.openingStock.totalValue), 'By Sales', r2(r.revenue)],
         ['   fuel', r2(r.openingStock.fuelValue), '   fuel', r2(r.fuelRevenue)],
         ['   oil', r2(r.openingStock.oilValue), '   oil', r2(r.oilRevenue)],
@@ -3482,7 +3532,9 @@ function exportReportExcel(rep){
           // Same pairing as on screen: gross loss sits on the debit side, gross profit on the credit side.
           const dr = [], cr = [];
           if (g < 0) dr.push(['To Gross Loss b/d', r2(-g)]); else cr.push(['By Gross Profit b/d', r2(g)]);
-          dr.push(['To Running expenses', r2(r.expenseTotal)], ['To Salary', r2(r.salary)], ['To Other expenses (journal)', r2(r.otherExpense)]);
+          if (r.basis==='accrual' && num(r.fixedAccrued)) dr.push(['To Fixed costs (accrued)', r2(r.fixedAccrued)], ['To Other running expenses', r2(r.expenseTotal - r.fixedAccrued)]);
+          else dr.push(['To Running expenses', r2(r.expenseTotal)]);
+          dr.push(['To Salary', r2(r.salary)], ['To Other expenses (journal)', r2(r.otherExpense)]);
           cr.push(['By Other income', r2(r.otherIncome)]);
           if (n >= 0) dr.push(['To Net Profit', r2(n)]); else cr.push(['By Net Loss', r2(-n)]);
           const out = [];
@@ -3532,6 +3584,11 @@ function exportReportExcel(rep){
   if (has('credit')) addSheet('Credit sales', [['Date', 'Creditor', 'Staff', 'Indent No.', 'Vehicle No.', 'Liters', 'Amount (₹)'], ...r.creditSales.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(x=>[x.date, x.creditorName, x.staffName, x.indentNo||'', x.vehicleNo||'', r2(x.liters), r2(x.amount)])], [12, 22, 18, 12, 14, 10, 12]);
   if (has('oils')) addSheet('Oil sales', [['Date', 'Staff', 'Product', 'Qty', 'Rate (₹)', 'Amount (₹)'], ...r.oils.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(o=>[o.date, o.staffName, oilProductName(o.productId, o.name), r2(o.qty), r2(o.rate), r2(o.amount)])], [12, 18, 26, 10, 12, 14]);
   if (has('purchases')) addSheet('Purchases', [['Date', 'Product', 'Tank', 'Supplier', 'Invoice / DO', 'Liters', 'Rate', 'Amount (₹)'], ...r.purchases.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, state.config.products[it.product]||it.product||'', it.tankName||'', it.supplier||'', it.ref||'', r2(it.liters), r2(it.rate), r2(it.amount)])], [12, 14, 12, 16, 14, 10, 9, 12]);
+  if (has('summary') && (r.fixedLines||[]).length) addSheet('Fixed costs', [
+    ['Cost', 'Charged to', 'Frequency', 'Per month (₹)', 'Accrued for period (₹)', 'Actually paid (₹)', 'Difference (₹)'],
+    ...r.fixedLines.map(x=>[x.name, x.account, (FIXED_FREQ[x.frequency]||{}).label||x.frequency||'', r2(x.perMonth), r2(x.accrued), r2(x.paid), r2(x.diff)]),
+    ['Total', '', '', '', r2(r.fixedAccrued), r2(r.fixedPaid), r2(r.fixedPaid-r.fixedAccrued)],
+  ], [26, 22, 12, 16, 20, 18, 16]);
   if (has('expenses')) addSheet('Expenses', [['Date', 'Category', 'Description', 'Source', 'Amount (₹)'], ...r.expenses.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, it.category||'', it.description||'', it.source==='duty'?'Duty till':'Manual', r2(it.amount)])], [12, 22, 30, 10, 12]);
   if (has('payments')) addSheet('Payments', [['Date', 'Paid to', 'Payment for', 'Description', 'Mode', 'Paid from', 'Ledger', 'Amount (₹)'], ...r.payments.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, it.party||'', it.item||'', it.description||'', it.mode||'', paidFromLabel(it.paidFrom), targetLabel(it.ledger)||'', r2(it.amount)])], [12, 22, 20, 30, 12, 16, 22, 12]);
   if (has('salary')) addSheet('Salary', [['Month', 'Staff', 'Wage type', 'Hours', 'Base (₹)', 'Advance (₹)', 'Deduction (₹)', 'Net (₹)', 'Status', 'Paid date'], ...r.salaryRows.map(s=>[s.month, s.name, s.wageType||'monthly', s.hoursWorked!=null?r2(s.hoursWorked):'', r2(s.baseSalary), r2(s.advance), r2(s.deduction), r2(s.netPaid), s.status||'', s.paidDate||''])], [10, 18, 10, 8, 12, 12, 13, 12, 9, 12]);
@@ -4139,6 +4196,111 @@ async function loadReceiptsList(){
   wireMonthSwitcher(()=>{ loadReceiptsList(); });
 }
 
+/* ============================== FIXED COSTS (accrual) ============================== */
+// Rent, electricity and the like land on whatever date they are paid, which makes a half-month or
+// quarterly P&L misleading. A fixed cost states what the charge is worth per month, and the report
+// can spread it across the days of the period instead — a whole calendar month always accrues
+// exactly the stated amount, never a fraction of it.
+const FIXED_FREQ = {monthly:{label:'Monthly', months:1}, quarterly:{label:'Quarterly', months:3}, yearly:{label:'Yearly', months:12}};
+function fixedMonthlyAmount(fc){ return num(fc.amount) / ((FIXED_FREQ[fc.frequency]||FIXED_FREQ.monthly).months); }
+function fixedCostAccountLabel(fc){
+  if (!fc.account) return fc.category || '—';
+  if (fc.account.startsWith('cat:')) return fc.account.slice(4);
+  return dutyPayLabel(fc.account, fc.category);
+}
+// Days of `monthId` that fall inside [from,to] and inside the cost's own start/end dates.
+function coveredDaysInMonth(monthId, from, to, startDate, endDate){
+  const mStart = monthId+'-01', mEnd = monthEnd(monthId);
+  const lo = [mStart, from, startDate||'0000-01-01'].sort().pop();
+  const hi = [mEnd, to, endDate||'9999-12-31'].sort()[0];
+  if (lo > hi) return 0;
+  return daysBetween(lo, hi);
+}
+// What one fixed cost accrues over [from,to]. Each calendar month contributes its monthly amount
+// scaled by the share of that month's days the period covers, so full months come out exact.
+function accrueFixedCost(fc, from, to){
+  if (fc.active===false) return 0;
+  const monthly = fixedMonthlyAmount(fc);
+  if (!monthly) return 0;
+  let total = 0;
+  monthsBetween(from, to).forEach(m=>{
+    const days = coveredDaysInMonth(m, from, to, fc.startDate, fc.endDate);
+    if (!days) return;
+    total += monthly * (days / daysInMonth(m));
+  });
+  return Math.round(total*100)/100;
+}
+// True when an actual expense/payment line settles this fixed cost, so accrual mode can leave it
+// out of the P&L (it becomes settlement of the accrued charge) and report it as "paid" instead.
+function matchesFixedCost(fc, item){
+  const acc = fc.account || '';
+  if (acc && !acc.startsWith('cat:')) return (item.ledger||item.account||'') === acc;
+  const cat = acc.startsWith('cat:') ? acc.slice(4) : (fc.category||'');
+  if (!cat) return false;
+  return String(item.category||'').toLowerCase() === cat.toLowerCase();
+}
+
+function renderSetupFixedCosts(body){
+  const list = state.fixedCosts.slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  const monthlyTotal = list.filter(f=>f.active!==false).reduce((s,f)=>s+fixedMonthlyAmount(f),0);
+  body.innerHTML = `
+    <div class="banner info">${icon('receipt')}<div>Recurring charges such as rent, electricity, insurance or a loan EMI. A report run on the <strong>Accrued</strong> basis spreads these across the days of the period you pick — a half month carries half the rent, a quarter carries exactly three months — instead of showing whatever happened to be paid in those dates. Reports stay on the <strong>As paid</strong> basis unless you switch them.</div></div>
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <div class="form-grid">
+        <div class="field"><label>Name</label><input type="text" id="fcName" placeholder="e.g. Shop rent"></div>
+        <div class="field"><label>Charged to</label><select id="fcAccount">${dutyPayAccountOptions('')}</select></div>
+        <div class="field"><label>Amount (₹)</label><input type="number" step="0.01" id="fcAmount" placeholder="0.00"></div>
+        <div class="field"><label>Frequency</label><select id="fcFreq">${Object.entries(FIXED_FREQ).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('')}</select></div>
+        <div class="field"><label>Applies from</label><input type="date" id="fcStart" value="${monthIdOf(todayStr())}-01"></div>
+        <div class="field"><label>Until (optional)</label><input type="date" id="fcEnd"></div>
+        <div class="field"><button class="btn primary" id="fcAdd" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add fixed cost</button></div>
+      </div>
+      <div class="hint" style="color:var(--text-faint);font-size:12px;">Enter the charge for one full period — a monthly rent as Monthly, an annual insurance premium as Yearly. Leave "Until" empty while it is still running.</div>
+      <div id="fcMsg" style="font-size:13px;"></div>
+    </div>
+    <div class="card"><div class="table-wrap"><table>
+      <thead><tr><th>Name</th><th>Charged to</th><th class="num">Amount</th><th>Frequency</th><th class="num">Per month</th><th>Period</th><th>Status</th><th></th></tr></thead>
+      <tbody>${list.length? list.map(f=>`<tr>
+        <td>${esc(f.name)}</td>
+        <td>${esc(fixedCostAccountLabel(f))}</td>
+        <td class="num">${money(f.amount)}</td>
+        <td>${esc((FIXED_FREQ[f.frequency]||{}).label||f.frequency||'')}</td>
+        <td class="num">${money(fixedMonthlyAmount(f))}</td>
+        <td style="white-space:nowrap;font-size:12.5px;">${f.startDate?fmtDateLabel(f.startDate):'—'} → ${f.endDate?fmtDateLabel(f.endDate):'ongoing'}</td>
+        <td><span class="pill ${f.active!==false?'good':'neutral'}">${f.active!==false?'Active':'Inactive'}</span></td>
+        <td style="white-space:nowrap;"><button class="btn ghost sm" data-fedit="${f.id}">${icon('edit')}</button> <button class="btn ghost sm" data-ftoggle="${f.id}" data-cur="${f.active!==false}">${f.active!==false?'Deactivate':'Activate'}</button>${f.active===false?` <button class="btn danger sm" data-fdel="${f.id}">${icon('trash')}</button>`:''}</td>
+      </tr>`).join('') : `<tr><td colspan="8" class="empty">No fixed costs yet.</td></tr>`}</tbody>
+      ${list.length?`<tfoot><tr><td colspan="4" style="font-weight:700;">Total per month</td><td class="num" style="font-weight:700;">${money(monthlyTotal)}</td><td colspan="3"></td></tr></tfoot>`:''}
+    </table></div></div>
+  `;
+  $('#fcAdd').onclick = async ()=>{
+    const msg = $('#fcMsg');
+    const name = $('#fcName').value.trim();
+    if (!state.dbReady){ msg.innerHTML = `<span style="color:var(--critical)">Live data isn't connected.</span>`; return; }
+    if (!name){ msg.innerHTML = `<span style="color:var(--critical)">Name the cost.</span>`; return; }
+    if (!(num($('#fcAmount').value)>0)){ msg.innerHTML = `<span style="color:var(--critical)">Enter the amount.</span>`; return; }
+    const account = $('#fcAccount').value;
+    await state.db.collection('fixedCosts').add({
+      name, account, category: fixedCostAccountLabel({account}), amount:num($('#fcAmount').value),
+      frequency:$('#fcFreq').value, startDate:$('#fcStart').value, endDate:$('#fcEnd').value||'',
+      active:true, createdAt:new Date().toISOString(),
+    });
+    await logActivity({entity:'Fixed cost', entityLabel:name, action:'add', summary:`${money($('#fcAmount').value)} ${(FIXED_FREQ[$('#fcFreq').value]||{}).label||''}`});
+    renderSetup($('#viewMount'));
+  };
+  $$('[data-fedit]', body).forEach(b=>b.onclick=()=>openSetupEditModal('fixedCosts', b.dataset.fedit));
+  $$('[data-ftoggle]', body).forEach(b=>b.onclick=async ()=>{ await state.db.doc('fixedCosts/'+b.dataset.ftoggle).update({active: b.dataset.cur!=='true'}); });
+  $$('[data-fdel]', body).forEach(b=>b.onclick=async ()=>{
+    const f = state.fixedCosts.find(x=>x.id===b.dataset.fdel);
+    if (!f) return;
+    const ok = await confirmModal({title:`Delete ${f.name}?`, body:'This removes the schedule. Reports run on the accrued basis will no longer spread this charge; payments already recorded are untouched.', confirmLabel:'Delete fixed cost'});
+    if (!ok) return;
+    await state.db.doc('fixedCosts/'+f.id).delete();
+    await logActivity({entity:'Fixed cost', entityLabel:f.name, action:'delete'});
+    renderSetup($('#viewMount'));
+  });
+}
+
 /* ============================== SETUP ============================== */
 // Field configs + collection/list lookups for the generic Setup "Edit" modal — one entry per
 // master-data type, shared by openSetupEditModal so each Setup subtab doesn't need its own edit form.
@@ -4189,6 +4351,13 @@ const SETUP_ENTITY = {
     {key:'phone', label:'Phone', type:'tel'},
     {key:'notes', label:'Notes', type:'text'},
   ]},
+  fixedCosts: { label:'Fixed cost', collection:'fixedCosts', list:()=>state.fixedCosts, fields:()=>[
+    {key:'name', label:'Name', type:'text'},
+    {key:'amount', label:'Amount (₹)', type:'number', fmt:v=>money(v)},
+    {key:'frequency', label:'Frequency', type:'select', options:Object.entries(FIXED_FREQ).map(([k,v])=>({value:k,label:v.label}))},
+    {key:'startDate', label:'Applies from', type:'date'},
+    {key:'endDate', label:'Until (optional)', type:'date'},
+  ]},
   ledgers: { label:'Ledger', collection:'ledgers', list:()=>state.ledgers, fields:()=>[
     {key:'name', label:'Ledger name', type:'text'},
     {key:'group', label:'Group', type:'select', options:Object.entries(LEDGER_GROUPS).map(([k,g])=>({value:k,label:g.label})), fmt:v=>(LEDGER_GROUPS[v]||{}).label||v||'—'},
@@ -4227,7 +4396,7 @@ function renderSetup(mount){
     <h1 class="page-title">Setup</h1>
     <p class="page-sub">Master data for your station — tanks, nozzles, staff, shifts and today's rates.</p>
     <div class="subtabs" id="setupSubtabs">
-      ${['tanks','nozzles','staff','salary','creditors','suppliers','accounts','ledgers','users','rates','tools'].map(t=>`<button data-t="${t}" class="${state.setupTab===t?'active':''}">${t[0].toUpperCase()+t.slice(1)}</button>`).join('')}
+      ${['tanks','nozzles','staff','salary','creditors','suppliers','accounts','ledgers','fixed','users','rates','tools'].map(t=>`<button data-t="${t}" class="${state.setupTab===t?'active':''}">${t==='fixed'?'Fixed costs':t[0].toUpperCase()+t.slice(1)}</button>`).join('')}
     </div>
     <div id="setupBody"></div>
   `;
@@ -4244,6 +4413,7 @@ function renderSetup(mount){
     case 'salary': renderSalary(body); break;
     case 'rates': renderSetupRates(body); break;
     case 'ledgers': renderSetupLedgers(body); break;
+    case 'fixed': renderSetupFixedCosts(body); break;
     case 'tools': renderSetupTools(body); break;
   }
 }
