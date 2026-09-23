@@ -1018,7 +1018,7 @@ function renderDutyForm(mount){
     cb.addEventListener('change', ()=>onNozzleCheck(cb));
   });
   updateNozzleHint();
-  $('#dfAddCredit').onclick = ()=>{ dutyForm.creditSales.push({id:uid(), creditorId:'', creditorName:'', amount:0, liters:0, indentNo:'', vehicleNo:''}); renderCreditRows(); };
+  $('#dfAddCredit').onclick = ()=>{ dutyForm.creditSales.push({id:uid(), creditorId:'', creditorName:'', product:'', rate:0, amount:0, liters:0, indentNo:'', vehicleNo:''}); renderCreditRows(); };
   $('#dfAddExpense').onclick = ()=>{ dutyForm.expenses.push({id:uid(), account:'', category:'', description:'', amount:0}); renderDutyExpenseRows(); };
   $('#dfAddOil').onclick = ()=>{ dutyForm.oils.push({id:uid(), productId:'', name:'', qty:0, rate:0, amount:0, savedQty:0}); renderOilRows(); };
   $('#dfSave').onclick = saveDutyEntry;
@@ -1134,7 +1134,7 @@ async function renderDutyRows(){
     const tr = document.createElement('tr');
     tr.dataset.nozzle = nid;
     tr.innerHTML = `<td><strong>${esc(n.name)}</strong>${tank?`<div class="hint" style="font-size:11.5px;color:var(--text-faint)">${esc(tank.name)}</div>`:''}</td>
-      <td class="num">${row.rate!=null?money(row.rate):'<span class="pill warning">not set</span>'}</td>
+      <td class="num"><input type="number" step="0.01" class="rateIn" value="${row.rate??''}" placeholder="0.00" title="Rate for this nozzle on this duty — change it to override today's rate" style="width:115px;text-align:right;"></td>
       <td class="num"><input type="number" step="0.01" class="opening" value="${row.opening??0}" style="width:140px;text-align:right;"></td>
       <td class="num"><input type="number" step="0.01" class="closing" value="${row.closing??''}" placeholder="0.00" style="width:140px;text-align:right;"></td>
       <td class="num"><input type="number" step="0.01" class="testL" value="${row.testLiters||0}" style="width:95px;text-align:right;"></td>
@@ -1152,6 +1152,7 @@ async function renderDutyRows(){
       <td class="num saleCell">—</td><td class="num amtCell">—</td>`;
     tbody.appendChild(tr);
     const upd = ()=>updateDutyRowCalc(nid, tr);
+    tr.querySelector('.rateIn').addEventListener('input', upd);
     tr.querySelector('.opening').addEventListener('input', upd);
     tr.querySelector('.closing').addEventListener('input', upd);
     tr.querySelector('.testL').addEventListener('input', upd);
@@ -1175,6 +1176,10 @@ function updateDutyRowCalc(nid, tr){
   const transferOn = tr.querySelector('.xferOn').checked;
   const transferL = transferOn ? Math.max(0, num(tr.querySelector('.xferL').value)) : 0;
   const transferTank = transferOn ? tr.querySelector('.xferTank').value : '';
+  // The rate defaults to the one set for the date, but can be typed over for this duty.
+  const rateEl = tr.querySelector('.rateIn');
+  const rateRaw = rateEl ? rateEl.value : '';
+  row.rate = rateRaw==='' ? null : num(rateRaw);
   row.opening=opening; row.closing=closing; row.testLiters=testL;
   row.transferOn=transferOn; row.transferLiters=transferL; row.transferToTankId=transferTank;
   const saleCell = tr.querySelector('.saleCell'), amtCell = tr.querySelector('.amtCell');
@@ -1208,35 +1213,52 @@ function recomputeDutyTotals(){
 function renderCreditRows(){
   const el = $('#dfCreditRows'); if(!el) return;
   if (!dutyForm.creditSales.length){ el.innerHTML = `<div class="hint" style="color:var(--text-faint);font-size:12.5px;">No credit sales added.</div>`; recomputePayments(); return; }
-  el.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Creditor</th><th>Indent No.</th><th>Vehicle No.</th><th class="num">Liters</th><th class="num">Amount</th><th></th></tr></thead><tbody id="dfCreditTbody"></tbody></table></div>
-    <div class="hint" style="color:var(--text-faint);font-size:12px;margin-top:6px;">Fill in Liters when this credit is a fuel transfer to a Bowser — it tops up that Bowser's tracked stock.</div>`;
+  el.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Creditor</th><th>Product</th><th>Indent No.</th><th>Vehicle No.</th><th class="num">Liters</th><th class="num">Rate</th><th class="num">Amount</th><th></th></tr></thead><tbody id="dfCreditTbody"></tbody></table></div>
+    <div class="hint" style="color:var(--text-faint);font-size:12px;margin-top:6px;">Pick the product and the rate fills in from the day's rates — liters × rate gives the amount, and typing an amount directly overrides it. Liters also top up a Bowser's tracked stock when the creditor is one.</div>`;
   const tbody = $('#dfCreditTbody');
   dutyForm.creditSales.forEach(c=>{
     const tr = document.createElement('tr'); tr.dataset.id = c.id;
-    tr.innerHTML = `<td><select class="cSel">${state.creditors.filter(x=>x.active!==false).map(x=>`<option value="${x.id}" ${x.id===c.creditorId?'selected':''}>${esc(x.name)}${x.isBowser?' (Bowser)':''}</option>`).join('')||'<option value="">Add creditors in Setup</option>'}</select></td>
+    tr.innerHTML = `<td><select class="cSel" style="max-width:170px;">${state.creditors.filter(x=>x.active!==false).map(x=>`<option value="${x.id}" ${x.id===c.creditorId?'selected':''}>${esc(x.name)}${x.isBowser?' (Bowser)':''}</option>`).join('')||'<option value="">Add creditors in Setup</option>'}</select></td>
+      <td><select class="cProd" style="width:140px;"><option value="">—</option>${PRODUCT_KEYS.map(k=>`<option value="${k}" ${k===c.product?'selected':''}>${esc(state.config.products[k]||k)}</option>`).join('')}</select></td>
       <td><input type="text" class="cIndent" value="${esc(c.indentNo||'')}" style="width:90px;"></td>
       <td><input type="text" class="cVeh" value="${esc(c.vehicleNo||'')}" style="width:100px;"></td>
-      <td class="num"><input type="number" step="0.01" class="cLtr" value="${c.liters||0}" style="width:100px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="cLtr" value="${c.liters||''}" placeholder="0" style="width:100px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="cRate" value="${c.rate||''}" placeholder="0.00" style="width:110px;text-align:right;"></td>
       <td class="num"><input type="number" step="0.01" class="cAmt" value="${c.amount||0}" style="width:115px;text-align:right;"></td>
       <td><button class="btn ghost sm cRemove">${icon('trash')}</button></td>`;
     tbody.appendChild(tr);
-    const sel = tr.querySelector('.cSel');
-    const sync = ()=>{
+    const sel = tr.querySelector('.cSel'), prodEl = tr.querySelector('.cProd');
+    const ltrEl = tr.querySelector('.cLtr'), rateEl = tr.querySelector('.cRate'), amtEl = tr.querySelector('.cAmt');
+    // `calc` is true when the edit was to liters or rate, so the amount is recomputed from them;
+    // editing the amount itself leaves it alone.
+    const sync = (calc)=>{
       c.creditorId = sel.value;
       c.creditorName = (state.creditors.find(x=>x.id===sel.value)||{}).name||'';
+      c.product = prodEl.value;
       c.indentNo = tr.querySelector('.cIndent').value;
       c.vehicleNo = tr.querySelector('.cVeh').value;
-      c.liters = num(tr.querySelector('.cLtr').value);
-      c.amount = num(tr.querySelector('.cAmt').value);
+      c.liters = num(ltrEl.value);
+      c.rate = num(rateEl.value);
+      if (calc && c.rate){ c.amount = Math.round(c.liters*c.rate*100)/100; amtEl.value = c.amount; }
+      else c.amount = num(amtEl.value);
       recomputePayments();
     };
-    sel.addEventListener('change', sync);
-    tr.querySelector('.cIndent').addEventListener('input', sync);
-    tr.querySelector('.cVeh').addEventListener('input', sync);
-    tr.querySelector('.cLtr').addEventListener('input', sync);
-    tr.querySelector('.cAmt').addEventListener('input', sync);
+    prodEl.addEventListener('change', async ()=>{
+      // Fill the rate from the day's rate for that product unless one was typed already.
+      if (prodEl.value && !num(rateEl.value)){
+        const r = await getRateForDate(dutyForm.date, prodEl.value);
+        if (r!=null) rateEl.value = r;
+      }
+      sync(true);
+    });
+    sel.addEventListener('change', ()=>sync(false));
+    tr.querySelector('.cIndent').addEventListener('input', ()=>sync(false));
+    tr.querySelector('.cVeh').addEventListener('input', ()=>sync(false));
+    ltrEl.addEventListener('input', ()=>sync(true));
+    rateEl.addEventListener('input', ()=>sync(true));
+    amtEl.addEventListener('input', ()=>sync(false));
     tr.querySelector('.cRemove').onclick = ()=>{ dutyForm.creditSales = dutyForm.creditSales.filter(x=>x.id!==c.id); renderCreditRows(); };
-    sync();
+    sync(false);
   });
   recomputePayments();
 }
@@ -1402,7 +1424,7 @@ async function saveDutyEntry(){
       date:dutyForm.date, dutyId:dutyForm.dutyId, staffId:dutyForm.staffId, staffName,
       startTime:dutyForm.startTime, endTime:dutyForm.endTime, nozzleIds:dutyForm.nozzleIds, entries,
       pay:{pos:dutyForm.pos||0, upi:dutyForm.upi||0, hpCard:dutyForm.hpCard||0, bankAccountId:dutyForm.bankAccountId||''},
-      creditSales: dutyForm.creditSales.filter(c=>num(c.amount)>0 || num(c.liters)>0),
+      creditSales: dutyForm.creditSales.filter(c=>num(c.amount)>0 || num(c.liters)>0).map(c=>({id:c.id, creditorId:c.creditorId, creditorName:c.creditorName, product:c.product||'', rate:num(c.rate), liters:num(c.liters), amount:num(c.amount), indentNo:c.indentNo||'', vehicleNo:c.vehicleNo||''})),
       expenses: dutyForm.expenses.filter(e=>num(e.amount)>0).map(e=>({id:e.id, account:e.account||'', category:e.category||'', description:e.description||'', amount:num(e.amount), subjectType:e.subjectType||'', subjectId:e.subjectId||'', subjectName:e.subjectName||''})),
       oils: (dutyForm.oils||[]).filter(o=>num(o.amount)>0 || num(o.qty)>0)
         .map(o=>({id:o.id, productId:o.productId||'', name:o.name||'', qty:num(o.qty), rate:num(o.rate), amount:num(o.amount)})),
@@ -3366,9 +3388,9 @@ function renderReportBody(body, cfg, r, c){
   }
   if (has('credit')){
     const rows = r.creditSales.slice().sort(sortD);
-    parts.push(table('Credit sales', [{label:'Date'},{label:'Creditor'},{label:'Staff'},{label:'Indent'},{label:'Vehicle'},{label:'Liters',num:true},{label:'Amount',num:true}],
-      rows.map(x=>[fmtDateLabel(x.date), esc(x.creditorName), esc(x.staffName), esc(x.indentNo||'—'), esc(x.vehicleNo||'—'), liters(x.liters), money(x.amount)]),
-      ['Total','','','','', liters(rows.reduce((s,x)=>s+num(x.liters),0)), money(rows.reduce((s,x)=>s+num(x.amount),0))]));
+    parts.push(table('Credit sales', [{label:'Date'},{label:'Creditor'},{label:'Product'},{label:'Staff'},{label:'Indent'},{label:'Vehicle'},{label:'Liters',num:true},{label:'Rate',num:true},{label:'Amount',num:true}],
+      rows.map(x=>[fmtDateLabel(x.date), esc(x.creditorName), esc(state.config.products[x.product]||x.product||'—'), esc(x.staffName), esc(x.indentNo||'—'), esc(x.vehicleNo||'—'), liters(x.liters), x.rate?money(x.rate):'—', money(x.amount)]),
+      ['Total','','','','','', liters(rows.reduce((s,x)=>s+num(x.liters),0)), '', money(rows.reduce((s,x)=>s+num(x.amount),0))]));
   }
   if (has('oils')){
     const rows = r.oils.slice().sort(sortD);
@@ -3581,7 +3603,7 @@ function exportReportExcel(rep){
     ['Date', 'Staff', 'Nozzle', 'Product', 'Opening', 'Closing', 'Test (L)', 'Transfer (L)', 'Sale (L)', 'Rate', 'Amount (₹)'],
     ...r.nozzleRows.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(n=>[n.date, n.staffName, n.nozzle, state.config.products[n.product]||n.product||'', r2(n.opening), r2(n.closing), r2(n.testLiters), r2(n.transferLiters), r2(n.liters), r2(n.rate), r2(n.amount)]),
   ], [12, 18, 12, 14, 12, 12, 9, 11, 10, 9, 12]);
-  if (has('credit')) addSheet('Credit sales', [['Date', 'Creditor', 'Staff', 'Indent No.', 'Vehicle No.', 'Liters', 'Amount (₹)'], ...r.creditSales.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(x=>[x.date, x.creditorName, x.staffName, x.indentNo||'', x.vehicleNo||'', r2(x.liters), r2(x.amount)])], [12, 22, 18, 12, 14, 10, 12]);
+  if (has('credit')) addSheet('Credit sales', [['Date', 'Creditor', 'Product', 'Staff', 'Indent No.', 'Vehicle No.', 'Liters', 'Rate (₹)', 'Amount (₹)'], ...r.creditSales.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(x=>[x.date, x.creditorName, state.config.products[x.product]||x.product||'', x.staffName, x.indentNo||'', x.vehicleNo||'', r2(x.liters), r2(x.rate), r2(x.amount)])], [12, 22, 14, 18, 12, 14, 10, 12, 14]);
   if (has('oils')) addSheet('Oil sales', [['Date', 'Staff', 'Product', 'Qty', 'Rate (₹)', 'Amount (₹)'], ...r.oils.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(o=>[o.date, o.staffName, oilProductName(o.productId, o.name), r2(o.qty), r2(o.rate), r2(o.amount)])], [12, 18, 26, 10, 12, 14]);
   if (has('purchases')) addSheet('Purchases', [['Date', 'Product', 'Tank', 'Supplier', 'Invoice / DO', 'Liters', 'Rate', 'Amount (₹)'], ...r.purchases.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, state.config.products[it.product]||it.product||'', it.tankName||'', it.supplier||'', it.ref||'', r2(it.liters), r2(it.rate), r2(it.amount)])], [12, 14, 12, 16, 14, 10, 9, 12]);
   if (has('summary') && (r.fixedLines||[]).length) addSheet('Fixed costs', [
