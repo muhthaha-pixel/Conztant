@@ -2989,29 +2989,71 @@ function renderReportBody(body, cfg, r, c){
       ${kpi('Net P&L', r.net, P('net'), 'gross + other income − expenses', {signColor:true})}
       ${kpi('Fuel liters', r.liters, P('liters'), '', {fmt:liters})}
     </div>`);
-    // The same figures as a trading account, so the arithmetic is auditable line by line.
-    const plLine = (label, val, opts)=>{
+    // Presented the way a trading and profit & loss account is written up: debit side on the left,
+    // credit side on the right, each half totalling to the same figure.
+    const tRow = (dr, drAmt, cr, crAmt, opts)=>{
       opts = opts||{};
-      return `<tr${opts.strong?' style="font-weight:700;"':''}><td>${opts.indent?'<span style="padding-left:14px;"></span>':''}${label}</td><td class="num"${opts.color?` style="color:var(--${num(val)>=0?'good':'critical'});"`:''}>${opts.sign&&num(val)<0?'− '+money(Math.abs(val)):money(val)}</td>${c?`<td class="num">${money(opts.prev!=null?opts.prev:0)}</td>`:''}</tr>`;
+      const cell = (label, amt, bold)=> label==null
+        ? `<td></td><td class="num"></td>`
+        : `<td${bold?' style="font-weight:700;"':''}>${label}</td><td class="num"${bold?' style="font-weight:700;"':''}>${amt==null?'':money(amt)}</td>`;
+      return `<tr${opts.top?' style="border-top:2px solid var(--border);"':''}>${cell(dr, drAmt, opts.bold)}${cell(cr, crAmt, opts.bold)}</tr>`;
     };
-    const cp = (k)=> c ? (typeof c[k]==='object' && c[k] ? c[k].totalValue : c[k]) : null;
-    parts.push(`<div class="section-head"><h2>Profit &amp; Loss</h2><span class="hint">trading account</span></div>
+    const sub = (text)=>`<div class="hint" style="font-size:11px;color:var(--text-faint);">${text}</div>`;
+    const gross = r.grossMargin, net = r.net;
+    const tradingDrTotal = r.openingStock.totalValue + r.purchaseTotal + Math.max(gross, 0);
+    const tradingCrTotal = r.revenue + r.closingStock.totalValue + Math.max(-gross, 0);
+    // A gross profit is brought down to the credit side of the P&L account; a gross loss to the
+    // debit side. Each side is built as its own list and the two are paired row by row.
+    const plDr = [], plCr = [];
+    if (gross < 0) plDr.push(['To Gross Loss b/d', -gross]); else plCr.push(['By Gross Profit b/d', gross]);
+    plDr.push(['To Running expenses', r.expenseTotal], ['To Salary', r.salary], ['To Other expenses (journal)', r.otherExpense]);
+    plCr.push(['By Other income', r.otherIncome]);
+    if (net >= 0) plDr.push(['To Net Profit', net]); else plCr.push(['By Net Loss', -net]);
+    const plRows = Array.from({length: Math.max(plDr.length, plCr.length)}, (_, i)=>[plDr[i]||null, plCr[i]||null]);
+    const plDrTotal = plDr.reduce((s,x)=>s+num(x[1]), 0);
+    const plCrTotal = plCr.reduce((s,x)=>s+num(x[1]), 0);
+    parts.push(`
+      <div class="section-head"><h2>Trading Account</h2><span class="hint">${esc(rangeLabel(r.from, r.to))}</span></div>
       <div class="card"><div class="table-wrap"><table>
-        <thead><tr><th>Item</th><th class="num">Amount</th>${c?`<th class="num">${esc(rangeLabel(c.from,c.to))}</th>`:''}</tr></thead>
+        <thead><tr><th>Particulars (Dr)</th><th class="num">Amount</th><th>Particulars (Cr)</th><th class="num">Amount</th></tr></thead>
         <tbody>
-          ${plLine('Sales (fuel + oil)', r.revenue, {prev:cp('revenue')})}
-          ${plLine('Add: Closing stock', r.closingStock.totalValue, {prev:cp('closingStock')})}
-          ${plLine('Less: Opening stock', -r.openingStock.totalValue, {prev:c?-cp('openingStock'):null})}
-          ${plLine('Less: Purchases (fuel + oil)', -r.purchaseTotal, {prev:c?-cp('purchaseTotal'):null})}
-          ${plLine('Gross P&L', r.grossMargin, {strong:true, color:true, prev:cp('grossMargin')})}
-          ${plLine('Add: Other income', r.otherIncome, {indent:true, prev:cp('otherIncome')})}
-          ${plLine('Less: Expenses — running', -r.expenseTotal, {indent:true, prev:c?-cp('expenseTotal'):null})}
-          ${plLine('Less: Expenses — salary', -r.salary, {indent:true, prev:c?-cp('salary'):null})}
-          ${plLine('Less: Expenses — other (journal)', -r.otherExpense, {indent:true, prev:c?-cp('otherExpense'):null})}
-          ${plLine('Net P&L', r.net, {strong:true, color:true, prev:cp('net')})}
+          ${tRow(`To Opening stock${sub(fmtDateLabel(r.openingStock.date)+' · fuel '+moneyShort(r.openingStock.fuelValue)+' · oil '+moneyShort(r.openingStock.oilValue))}`, r.openingStock.totalValue,
+                 `By Sales${sub('fuel '+moneyShort(r.fuelRevenue)+' · oil '+moneyShort(r.oilRevenue))}`, r.revenue)}
+          ${tRow(`To Purchases${sub('fuel '+moneyShort(r.fuelCost)+' · oil '+moneyShort(r.oilPurchaseCost))}`, r.purchaseTotal,
+                 `By Closing stock${sub(fmtDateLabel(r.closingStock.date)+' · fuel '+moneyShort(r.closingStock.fuelValue)+' · oil '+moneyShort(r.closingStock.oilValue))}`, r.closingStock.totalValue)}
+          ${gross>=0
+            ? tRow('To Gross Profit c/d', gross, null, null)
+            : tRow(null, null, 'By Gross Loss c/d', -gross)}
+          ${tRow('Total', tradingDrTotal, 'Total', tradingCrTotal, {bold:true, top:true})}
         </tbody>
       </table></div></div>
-      <div class="hint" style="color:var(--text-faint);font-size:12px;margin:6px 0 4px;">Stock is valued at cost — the purchase rate ruling on each date — and covers tanks, bowsers and lubricants. Opening stock is the position on ${fmtDateLabel(r.openingStock.date)}.</div>`);
+
+      <div class="section-head"><h2>Profit &amp; Loss Account</h2><span class="hint">${esc(rangeLabel(r.from, r.to))}</span></div>
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>Particulars (Dr)</th><th class="num">Amount</th><th>Particulars (Cr)</th><th class="num">Amount</th></tr></thead>
+        <tbody>
+          ${plRows.map(([dr, cr])=>tRow(dr?dr[0]:null, dr?dr[1]:null, cr?cr[0]:null, cr?cr[1]:null)).join('')}
+          ${tRow('Total', plDrTotal, 'Total', plCrTotal, {bold:true, top:true})}
+        </tbody>
+      </table></div></div>
+      <div class="row" style="justify-content:space-between;margin-top:10px;">
+        <span class="hint" style="color:var(--text-faint);font-size:12px;">Stock is valued at cost — the purchase rate ruling on each date — across tanks, bowsers and lubricants.</span>
+        <span class="pill ${net>=0?'good':'critical'}" style="font-size:13px;">${net>=0?'Net Profit':'Net Loss'} ${money(Math.abs(net))}</span>
+      </div>`);
+    if (c){
+      // Period-on-period comparison of the same lines, since the T-format itself holds one period.
+      const cmpLine = (label, cur, prev, lower)=>[label, money(cur), money(prev), deltaPill(cur, prev, {lowerIsBetter:lower})];
+      parts.push(table(`Compared with ${esc(rangeLabel(c.from, c.to))}`, [{label:'Item'},{label:'This period',num:true},{label:'Previous',num:true},{label:'Change'}], [
+        cmpLine('Sales', r.revenue, c.revenue),
+        cmpLine('Purchases', r.purchaseTotal, c.purchaseTotal, true),
+        cmpLine('Opening stock', r.openingStock.totalValue, c.openingStock.totalValue),
+        cmpLine('Closing stock', r.closingStock.totalValue, c.closingStock.totalValue),
+        cmpLine('Gross P&L', r.grossMargin, c.grossMargin),
+        cmpLine('Other income', r.otherIncome, c.otherIncome),
+        cmpLine('Expenses', r.totalExpenses, c.totalExpenses, true),
+        cmpLine('Net P&L', r.net, c.net),
+      ]));
+    }
   }
 
   if (has('balances')){
@@ -3210,19 +3252,39 @@ function exportReportExcel(rep){
 
   if (has('summary') || has('collections') || has('products') || has('balances')){
     // '_opening' / '_closing' read the stock snapshot objects and are shown as deductions/additions.
-    const v = (o,k)=> !o ? 0 : (k==='_opening' ? -num(o.openingStock&&o.openingStock.totalValue) : k==='_closing' ? num(o.closingStock&&o.closingStock.totalValue) : num(o[k]));
+    const v = (o,k)=> !o ? 0 : (k==='_opening' ? -num(o.openingStock&&o.openingStock.totalValue) : k==='_opening2' ? num(o.openingStock&&o.openingStock.totalValue) : k==='_closing' ? num(o.closingStock&&o.closingStock.totalValue) : num(o[k]));
     const line = (name, k)=> c ? [name, r2(v(r,k)), r2(v(c,k)), r2(v(r,k)-v(c,k))] : [name, r2(v(r,k))];
     const rows = [[station], [`Report — ${label}`], filt.length?['Filters', filt.join(' · ')]:[], []];
     if (has('summary')){
-      rows.push(c ? ['Item', 'This period (₹)', `Previous (${rangeLabel(c.from,c.to)})`, 'Change'] : ['Item', 'Amount (₹)']);
-      rows.push(line('Sales — fuel','fuelRevenue'), line('Sales — oil','oilRevenue'), line('Sales total','revenue'),
-        line('Add: Closing stock','_closing'), line('Less: Opening stock','_opening'),
-        line('Less: Purchases — fuel','fuelCost'), line('Less: Purchases — oil','oilPurchaseCost'), line('Purchases total','purchaseTotal'),
-        line('GROSS P&L','grossMargin'),
-        line('Add: Other income (journal + receipts)','otherIncome'),
-        line('Less: Expenses — running','expenseTotal'), line('Less: Expenses — salary','salary'), line('Less: Expenses — other (journal)','otherExpense'),
-        line('Expenses total','totalExpenses'),
-        line('NET P&L','net'), [], line('Fuel liters sold','liters'), []);
+      // Trading and P&L accounts in the same two-sided layout as the screen.
+      const g = num(r.grossMargin), n = num(r.net);
+      rows.push(['TRADING ACCOUNT — '+label], ['Particulars (Dr)', 'Amount (₹)', 'Particulars (Cr)', 'Amount (₹)'],
+        ['To Opening stock', r2(r.openingStock.totalValue), 'By Sales', r2(r.revenue)],
+        ['   fuel', r2(r.openingStock.fuelValue), '   fuel', r2(r.fuelRevenue)],
+        ['   oil', r2(r.openingStock.oilValue), '   oil', r2(r.oilRevenue)],
+        ['To Purchases', r2(r.purchaseTotal), 'By Closing stock', r2(r.closingStock.totalValue)],
+        ['   fuel', r2(r.fuelCost), '   fuel', r2(r.closingStock.fuelValue)],
+        ['   oil', r2(r.oilPurchaseCost), '   oil', r2(r.closingStock.oilValue)],
+        g>=0 ? ['To Gross Profit c/d', r2(g), '', ''] : ['', '', 'By Gross Loss c/d', r2(-g)],
+        ['Total', r2(r.openingStock.totalValue + r.purchaseTotal + Math.max(g,0)), 'Total', r2(r.revenue + r.closingStock.totalValue + Math.max(-g,0))],
+        [],
+        ['PROFIT & LOSS ACCOUNT — '+label], ['Particulars (Dr)', 'Amount (₹)', 'Particulars (Cr)', 'Amount (₹)'],
+        ...(function(){
+          // Same pairing as on screen: gross loss sits on the debit side, gross profit on the credit side.
+          const dr = [], cr = [];
+          if (g < 0) dr.push(['To Gross Loss b/d', r2(-g)]); else cr.push(['By Gross Profit b/d', r2(g)]);
+          dr.push(['To Running expenses', r2(r.expenseTotal)], ['To Salary', r2(r.salary)], ['To Other expenses (journal)', r2(r.otherExpense)]);
+          cr.push(['By Other income', r2(r.otherIncome)]);
+          if (n >= 0) dr.push(['To Net Profit', r2(n)]); else cr.push(['By Net Loss', r2(-n)]);
+          const out = [];
+          for (let i=0; i<Math.max(dr.length, cr.length); i++) out.push([(dr[i]||['',''])[0], (dr[i]||['',''])[1], (cr[i]||['',''])[0], (cr[i]||['',''])[1]]);
+          out.push(['Total', dr.reduce((s,x)=>s+num(x[1]),0), 'Total', cr.reduce((s,x)=>s+num(x[1]),0)]);
+          return out;
+        })(),
+        [], ['Fuel liters sold', r2(r.liters)], []);
+      if (c) rows.push(['COMPARISON', 'This period', 'Previous ('+rangeLabel(c.from,c.to)+')', 'Change'],
+        line('Sales','revenue'), line('Purchases','purchaseTotal'), line('Opening stock','_opening2'), line('Closing stock','_closing'),
+        line('Gross P&L','grossMargin'), line('Other income','otherIncome'), line('Expenses','totalExpenses'), line('Net P&L','net'), []);
     }
     if (has('collections') && r.payTotals){
       rows.push(c?['Collections by method','This period','Previous','Change']:['Collections by method', 'Amount (₹)']);
@@ -3244,7 +3306,7 @@ function exportReportExcel(rep){
         ['Receivable from creditors', r2(state.creditors.reduce((s,x)=>s+num(x.balance),0))],
         ['Payable to suppliers', r2(state.suppliers.reduce((s,x)=>s+num(x.balance),0))]);
     }
-    addSheet('Summary', rows, [34, 18, 22, 14, 14]);
+    addSheet('Summary', rows, [32, 18, 32, 18, 14]);
   }
   if (has('trend')){
     const days = []; for (let d=r.from; d<=r.to; d=addDays(d,1)) days.push(d);
