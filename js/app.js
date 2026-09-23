@@ -42,6 +42,10 @@ function fmtDateLabel(dateStr){
   return d.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'});
 }
 function debounce(fn, ms){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); }; }
+// Names like "1-1", "1-2", "2-1", "B-1" should read in pump order, so digits inside a name compare
+// as numbers rather than text — otherwise "10-1" sorts before "2-1".
+const naturalCompare = (a, b) => String(a==null?'':a).localeCompare(String(b==null?'':b), undefined, {numeric:true, sensitivity:'base'});
+const byName = (list) => (list||[]).slice().sort((x,y)=>naturalCompare(x.name, y.name));
 
 function icon(name){
   const paths = {
@@ -841,7 +845,7 @@ function tankLevelStatus(pct){
 
 function renderTankCards(el, opts){
   opts = opts||{};
-  const tanks = state.tanks.filter(t=>t.active!==false);
+  const tanks = byName(state.tanks.filter(t=>t.active!==false));
   if (!tanks.length){ el.innerHTML = `<div class="card empty">No tanks set up yet. Add them in Setup → Tanks.</div>`; return; }
   el.innerHTML = tanks.map(t=>{
     const cap = num(t.capacityL)||1;
@@ -931,7 +935,7 @@ async function editDuty(date, dutyId){
 }
 
 function renderDutyForm(mount){
-  const activeNozzles = state.nozzles.filter(n=>n.active!==false);
+  const activeNozzles = byName(state.nozzles.filter(n=>n.active!==false));
   mount.innerHTML = `
     <div class="row" style="justify-content:space-between;margin-bottom:10px;">
       <h1 class="page-title" style="margin-bottom:0;">${dutyForm.dutyId?'Edit duty':'New duty'} — ${fmtDateLabel(dutyForm.date)}</h1>
@@ -1111,7 +1115,11 @@ function updateNozzleHint(limitHit){
 
 async function renderDutyRows(){
   const el = $('#dfRows'); if(!el) return;
-  const ids = dutyForm.nozzleIds;
+  // Reading rows follow the same pump order as the chips above, whatever order they were ticked in.
+  const ids = dutyForm.nozzleIds.slice().sort((a,b)=>{
+    const na = state.nozzles.find(x=>x.id===a), nb = state.nozzles.find(x=>x.id===b);
+    return naturalCompare(na&&na.name, nb&&nb.name);
+  });
   if (!ids.length){ el.innerHTML = `<div class="card empty">Select the nozzles this staff member is handling above.</div>`; recomputeDutyTotals(); return; }
   el.innerHTML = `<div class="card"><div class="table-wrap"><table>
     <thead><tr><th>Nozzle</th><th class="num">Rate</th><th class="num">Opening</th><th class="num">Closing</th><th class="num">Test (L)</th><th>Transfer</th><th class="num">Sale liters</th><th class="num">Amount</th></tr></thead>
@@ -3098,7 +3106,7 @@ async function renderReports(mount){
       <div class="form-grid" style="margin-top:4px;">
         <div class="field"><label>Staff</label>${sel('rpStaff', state.staff.map(s=>({value:s.id,label:s.name})), cfg.staff, 'All staff')}</div>
         <div class="field"><label>Product</label>${sel('rpProduct', PRODUCT_KEYS.map(k=>({value:k,label:state.config.products[k]||k})), cfg.product, 'All products')}</div>
-        <div class="field"><label>Nozzle</label>${sel('rpNozzle', state.nozzles.map(n=>({value:n.id,label:n.name})), cfg.nozzle, 'All nozzles')}</div>
+        <div class="field"><label>Nozzle</label>${sel('rpNozzle', byName(state.nozzles).map(n=>({value:n.id,label:n.name})), cfg.nozzle, 'All nozzles')}</div>
         <div class="field"><label>Creditor</label>${sel('rpCreditor', state.creditors.map(c=>({value:c.id,label:c.name})), cfg.creditor, 'All creditors')}</div>
         <div class="field"><label>Payment method</label>${sel('rpMethod', [['cash','Cash'],['pos','POS / Card'],['upi','UPI'],['hpCard','HP Card'],['credit','Credit']].map(([v,l])=>({value:v,label:l})), cfg.method, 'All methods')}</div>
       </div>
@@ -3449,7 +3457,7 @@ function renderReportBody(body, cfg, r, c){
     parts.push(`<div class="section-head"><h2>Tank levels</h2><span class="hint">live, as of now</span></div>
       <div class="grid grid-2" id="repTankCards" style="margin-bottom:8px;"></div>
       <div class="grid grid-2" id="repBowserCards" style="margin-bottom:8px;"></div>`);
-    const tanks = state.tanks.filter(t=>t.active!==false);
+    const tanks = byName(state.tanks.filter(t=>t.active!==false));
     const purchasedByTank = {};
     r.purchases.forEach(it=>{ purchasedByTank[it.tankId] = (purchasedByTank[it.tankId]||0) + num(it.liters); });
     const soldByTank = {};
@@ -4482,7 +4490,7 @@ function renderSetupTanks(body){
     })()}
     <div class="card"><div class="table-wrap"><table>
       <thead><tr><th>Name</th><th>Product</th><th class="num">Capacity</th><th class="num">Current stock</th><th class="num">Cost rate</th><th>Status</th><th></th></tr></thead>
-      <tbody>${state.tanks.length? state.tanks.map(t=>`<tr>
+      <tbody>${state.tanks.length? byName(state.tanks).map(t=>`<tr>
         <td>${esc(t.name)}</td><td>${esc(state.config.products[t.product]||t.product)}</td>
         <td class="num">${liters(t.capacityL)}</td><td class="num">${liters(t.currentStockL)}</td>
         <td class="num">${num(t.costRate)?money(t.costRate):'—'}</td>
@@ -4552,7 +4560,7 @@ function renderSetupNozzles(body){
     </div>
     <div class="card"><div class="table-wrap"><table>
       <thead><tr><th>Nozzle</th><th>Tank</th><th>Product</th><th class="num">Last closing</th><th>Status</th><th></th></tr></thead>
-      <tbody>${state.nozzles.length? state.nozzles.map(n=>{
+      <tbody>${state.nozzles.length? byName(state.nozzles).map(n=>{
         const tank = state.tanks.find(t=>t.id===n.tankId);
         return `<tr><td>${esc(n.name)}</td><td>${tank?esc(tank.name):'—'}</td><td>${tank?esc(state.config.products[tank.product]||tank.product):'—'}</td>
         <td class="num">${liters(n.lastClosing)}</td>
