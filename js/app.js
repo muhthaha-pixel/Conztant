@@ -146,7 +146,7 @@ function openCreditorLedgerModal(creditor){
           <td><span class="hint" style="font-size:11.5px;color:var(--text-faint);">via Receipts — edit there</span></td>
         </tr>` : `<tr data-id="${p.id}">
           <td><input type="date" class="clDate" value="${p.date||''}" style="width:130px;"></td>
-          <td class="num"><input type="number" step="0.01" class="clAmt" value="${p.amount||0}" style="width:90px;text-align:right;"></td>
+          <td class="num"><input type="number" step="0.01" class="clAmt" value="${p.amount||0}" style="width:110px;text-align:right;"></td>
           <td><input type="text" class="clNote" value="${esc(p.note||'')}" style="width:120px;"></td>
           <td><button class="btn ghost sm clSave">Save</button> <button class="btn danger sm clDel">${icon('trash')}</button></td>
         </tr>`).join('') : `<tr><td colspan="4" class="empty">No payments recorded yet.</td></tr>`}</tbody></table>
@@ -214,7 +214,7 @@ function openAccountLedgerModal(account){
         <tbody id="alTbody">${ledger.length? ledger.map(l=>`<tr data-id="${l.id}" data-type="${l.type}">
           <td><input type="date" class="alDate" value="${l.date||''}" style="width:130px;"></td>
           <td><span class="pill neutral">${esc(l.type)}</span></td>
-          <td class="num"><input type="number" step="0.01" class="alAmt" value="${l.amount||0}" style="width:90px;text-align:right;"></td>
+          <td class="num"><input type="number" step="0.01" class="alAmt" value="${l.amount||0}" style="width:110px;text-align:right;"></td>
           <td><input type="text" class="alFrom" value="${esc(l.from||l.note||'')}" style="width:130px;"></td>
           <td><button class="btn ghost sm alSave">Save</button> <button class="btn danger sm alDel">${icon('trash')}</button></td>
         </tr>`).join('') : `<tr><td colspan="5" class="empty">No entries yet.</td></tr>`}</tbody></table>
@@ -1044,9 +1044,9 @@ function renderOilRows(){
   dutyForm.oils.forEach(o=>{
     const tr = document.createElement('tr'); tr.dataset.id = o.id;
     tr.innerHTML = `<td><select class="oSel" style="width:190px;"><option value="">Select product…</option>${products.map(p=>`<option value="${p.id}" ${p.id===o.productId?'selected':''}>${esc(p.name)}</option>`).join('')}</select></td>
-      <td class="num"><input type="number" step="0.01" class="oQty" value="${o.qty||''}" placeholder="0" style="width:75px;text-align:right;"></td>
-      <td class="num"><input type="number" step="0.01" class="oRate" value="${o.rate||''}" placeholder="0.00" style="width:90px;text-align:right;"></td>
-      <td class="num"><input type="number" step="0.01" class="oAmt" value="${o.amount||0}" style="width:100px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="oQty" value="${o.qty||''}" placeholder="0" style="width:95px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="oRate" value="${o.rate||''}" placeholder="0.00" style="width:110px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="oAmt" value="${o.amount||0}" style="width:120px;text-align:right;"></td>
       <td class="oStock hint" style="font-size:11.5px;color:var(--text-faint);white-space:nowrap;"></td>
       <td><button class="btn ghost sm oRemove">${icon('trash')}</button></td>`;
     tbody.appendChild(tr);
@@ -1130,14 +1130,14 @@ async function renderDutyRows(){
     tr.dataset.nozzle = nid;
     tr.innerHTML = `<td><strong>${esc(n.name)}</strong>${tank?`<div class="hint" style="font-size:11.5px;color:var(--text-faint)">${esc(tank.name)}</div>`:''}</td>
       <td class="num">${row.rate!=null?money(row.rate):'<span class="pill warning">not set</span>'}</td>
-      <td class="num"><input type="number" step="0.01" class="opening" value="${row.opening??0}" style="width:95px;text-align:right;"></td>
-      <td class="num"><input type="number" step="0.01" class="closing" value="${row.closing??''}" placeholder="0.00" style="width:95px;text-align:right;"></td>
-      <td class="num"><input type="number" step="0.01" class="testL" value="${row.testLiters||0}" style="width:80px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="opening" value="${row.opening??0}" style="width:140px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="closing" value="${row.closing??''}" placeholder="0.00" style="width:140px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="testL" value="${row.testLiters||0}" style="width:95px;text-align:right;"></td>
       <td>
         <label class="toggle"><input type="checkbox" class="xferOn" ${row.transferOn?'checked':''}> Stock transfer</label>
         <div class="xferFields" style="display:${row.transferOn?'flex':'none'};flex-direction:column;gap:4px;margin-top:4px;">
-          <input type="number" step="0.01" class="xferL" placeholder="Liters" value="${row.transferLiters||''}" style="width:90px;text-align:right;">
-          <select class="xferTank" style="width:130px;font-size:11.5px;">
+          <input type="number" step="0.01" class="xferL" placeholder="Liters" value="${row.transferLiters||''}" style="width:110px;text-align:right;">
+          <select class="xferTank" style="width:150px;">
             <option value="">To tank…</option>
             ${xferTanks.map(t=>`<option value="${t.id}" ${t.id===row.transferToTankId?'selected':''}>${esc(t.name)}</option>`).join('')}
           </select>
@@ -1211,8 +1211,8 @@ function renderCreditRows(){
     tr.innerHTML = `<td><select class="cSel">${state.creditors.filter(x=>x.active!==false).map(x=>`<option value="${x.id}" ${x.id===c.creditorId?'selected':''}>${esc(x.name)}${x.isBowser?' (Bowser)':''}</option>`).join('')||'<option value="">Add creditors in Setup</option>'}</select></td>
       <td><input type="text" class="cIndent" value="${esc(c.indentNo||'')}" style="width:90px;"></td>
       <td><input type="text" class="cVeh" value="${esc(c.vehicleNo||'')}" style="width:100px;"></td>
-      <td class="num"><input type="number" step="0.01" class="cLtr" value="${c.liters||0}" style="width:80px;text-align:right;"></td>
-      <td class="num"><input type="number" step="0.01" class="cAmt" value="${c.amount||0}" style="width:90px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="cLtr" value="${c.liters||0}" style="width:100px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="cAmt" value="${c.amount||0}" style="width:115px;text-align:right;"></td>
       <td><button class="btn ghost sm cRemove">${icon('trash')}</button></td>`;
     tbody.appendChild(tr);
     const sel = tr.querySelector('.cSel');
@@ -1285,7 +1285,7 @@ function renderDutyExpenseRows(){
     tr.innerHTML = `<td><select class="eCat" style="max-width:210px;">${dutyPayAccountOptions(sel)}</select></td>
       <td class="eForCell"></td>
       <td><input type="text" class="eDesc" value="${esc(e.description||'')}" style="width:140px;"></td>
-      <td class="num"><input type="number" step="0.01" class="eAmt" value="${e.amount||0}" style="width:90px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="eAmt" value="${e.amount||0}" style="width:115px;text-align:right;"></td>
       <td><button class="btn ghost sm eRemove">${icon('trash')}</button></td>`;
     tbody.appendChild(tr);
     const forCell = tr.querySelector('.eForCell');
@@ -2506,8 +2506,8 @@ function salaryRow(id, s){
   return `<tr data-staff="${id}">
     <td>${esc(s.name)}${s.wageType==='hourly'?`<div class="hint" style="font-size:11px;color:var(--text-faint)">hourly · ${numFmt(s.hoursWorked||0)} hrs</div>`:''}</td>
     <td class="num">${money(s.baseSalary)}</td>
-    <td class="num"><input type="number" class="adv" value="${s.advance||0}" style="width:90px;text-align:right;" ${paid?'disabled':''}></td>
-    <td class="num"><input type="number" class="ded" value="${s.deduction||0}" style="width:90px;text-align:right;" ${paid?'disabled':''}></td>
+    <td class="num"><input type="number" class="adv" value="${s.advance||0}" style="width:110px;text-align:right;" ${paid?'disabled':''}></td>
+    <td class="num"><input type="number" class="ded" value="${s.deduction||0}" style="width:110px;text-align:right;" ${paid?'disabled':''}></td>
     <td class="num" style="font-weight:600;">${money(s.netPaid)}</td>
     <td><span class="pill ${paid?'good':'neutral'}">${paid?'Paid':'Pending'}</span></td>
     <td>${paid ? `<span class="hint" style="font-size:11.5px;color:var(--text-faint)">${s.paidDate?fmtDateLabel(s.paidDate):''}</span>` : `<button class="btn sm primary" data-pay>Mark paid</button>`} <button class="btn ghost sm" data-edit style="margin-left:6px;">${icon('edit')}</button></td>
