@@ -2765,7 +2765,9 @@ function valuationRate(rates, tankId, product){
   if (t) return t.rate;
   const p = rates && rates.byProduct[product];
   if (p) return p.rate;
-  return num((state.config.costRates||{})[product]);
+  const tank = tankId && state.tanks.find(x=>x.id===tankId);
+  if (tank && num(tank.costRate)) return num(tank.costRate);       // rate entered for the stock already in the tank
+  return num((state.config.costRates||{})[product]);               // station-wide fallback
 }
 // Quantity and cost of every litre the station is holding — tanks plus any bowser stock.
 function stockValuation(rates){
@@ -3034,7 +3036,7 @@ function renderReportBody(body, cfg, r, c){
         const bad = [...new Set(unvaluedStock(r.openingStock).concat(unvaluedStock(r.closingStock)).map(x=>x.name))];
         if (!bad.length && r.purchaseTotal) return '';
         const msgs = [];
-        if (bad.length) msgs.push(`<strong>${esc(bad.join(', '))}</strong> hold stock but no purchase rate is known, so they are valued at ₹0 — which overstates gross profit. Set a cost rate in <strong>Setup → Rates → Cost rates</strong>, or record the purchase on the <strong>Purchase</strong> tab.`);
+        if (bad.length) msgs.push(`<strong>${esc(bad.join(', '))}</strong> hold stock but no purchase rate is known, so they are valued at ₹0 — which overstates gross profit. Enter what that stock cost in <strong>Setup → Tanks → Stock cost rates</strong>, or record the delivery on the <strong>Purchase</strong> tab.`);
         if (!r.purchaseTotal) msgs.push('No purchases are recorded in this period, so the whole of sales shows as gross profit. Enter deliveries on the <strong>Purchase</strong> tab for a true figure.');
         return `<div class="banner">${icon('receipt')}<div>${msgs.join('<br>')}</div></div>`;
       })()}
@@ -3925,6 +3927,7 @@ const SETUP_ENTITY = {
     {key:'product', label:'Product', type:'select', options:PRODUCT_KEYS.map(k=>({value:k,label:state.config.products[k]||k})), fmt:v=>state.config.products[v]||v||'—'},
     {key:'capacityL', label:'Capacity (L)', type:'number', fmt:v=>liters(v)},
     {key:'currentStockL', label:'Current stock (L) — manual correction', type:'number', fmt:v=>liters(v)},
+    {key:'costRate', label:'Stock cost rate (₹/L)', type:'number', fmt:v=>money(v)},
   ]},
   nozzles: { label:'Nozzle', collection:'nozzles', list:()=>state.nozzles, fields:()=>[
     {key:'name', label:'Nozzle / PU name', type:'text'},
@@ -4031,20 +4034,70 @@ function renderSetupTanks(body){
         <div class="field"><label>Product</label><select id="tkProduct">${PRODUCT_KEYS.map(k=>`<option value="${k}">${esc(state.config.products[k]||k)}</option>`).join('')}</select></div>
         <div class="field"><label>Capacity (L)</label><input type="number" id="tkCap" placeholder="0"></div>
         <div class="field"><label>Opening stock (L)</label><input type="number" id="tkStock" placeholder="0"></div>
+        <div class="field"><label>Purchase rate of that stock (₹/L)</label><input type="number" step="0.01" id="tkCost" placeholder="0.00"></div>
         <div class="field"><button class="btn primary" id="tkAdd" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add tank</button></div>
       </div>
+      <div class="hint" style="color:var(--text-faint);font-size:12px;">The purchase rate is what the fuel already in the tank cost you. It values opening and closing stock in the P&amp;L until a delivery is recorded on the Purchase tab, after which the latest purchase rate is used automatically.</div>
       <div id="tkMsg" style="font-size:13px;"></div>
     </div>
+    ${(()=>{
+      // Quick way to price stock that was in the tanks before the app was in use — the figure the
+      // trading account needs for opening and closing stock.
+      const active = state.tanks.filter(t=>t.active!==false);
+      if (!active.length) return '';
+      const missing = active.filter(t=>num(t.currentStockL)>0 && !valuationRate(null, t.id, t.product));
+      return `<div class="section-head"><h2>Stock cost rates</h2><span class="hint">used to value opening &amp; closing stock</span></div>
+      ${missing.length?`<div class="banner">${icon('tank')}<div><strong>${esc(missing.map(t=>t.name).join(', '))}</strong> hold stock with no known cost, so the P&amp;L values them at ₹0 and overstates profit. Enter what that fuel cost per litre below.</div></div>`:''}
+      <div class="card card-pad" style="margin-bottom:16px;">
+        <div class="table-wrap"><table>
+          <thead><tr><th>Tank</th><th>Product</th><th class="num">Stock now</th><th class="num">Cost rate (₹/L)</th><th class="num">Stock value</th><th>Rate source</th></tr></thead>
+          <tbody>${active.map(t=>{
+            const eff = valuationRate(null, t.id, t.product);
+            const own = num(t.costRate);
+            return `<tr data-tank="${t.id}">
+              <td>${esc(t.name)}</td><td>${esc(state.config.products[t.product]||t.product)}</td>
+              <td class="num">${liters(t.currentStockL)}</td>
+              <td class="num"><input type="number" step="0.01" class="tkRate" value="${own||''}" placeholder="0.00" style="width:100px;text-align:right;"></td>
+              <td class="num tkVal">${money(num(t.currentStockL)*eff)}</td>
+              <td class="hint" style="font-size:11.5px;color:var(--text-faint);">${own ? 'this rate' : (eff ? 'a recorded purchase' : '<span class="pill warning">none</span>')}</td>
+            </tr>`;
+          }).join('')}</tbody>
+        </table></div>
+        <div class="row" style="margin-top:10px;"><button class="btn primary" id="tkRatesSave" ${state.dbReady?'':'disabled'}>Save cost rates</button><span id="tkRatesMsg" style="font-size:13px;"></span></div>
+      </div>`;
+    })()}
     <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>Name</th><th>Product</th><th class="num">Capacity</th><th class="num">Current stock</th><th>Status</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Product</th><th class="num">Capacity</th><th class="num">Current stock</th><th class="num">Cost rate</th><th>Status</th><th></th></tr></thead>
       <tbody>${state.tanks.length? state.tanks.map(t=>`<tr>
         <td>${esc(t.name)}</td><td>${esc(state.config.products[t.product]||t.product)}</td>
         <td class="num">${liters(t.capacityL)}</td><td class="num">${liters(t.currentStockL)}</td>
+        <td class="num">${num(t.costRate)?money(t.costRate):'—'}</td>
         <td><span class="pill ${t.active!==false?'good':'neutral'}">${t.active!==false?'Active':'Inactive'}</span></td>
         <td><button class="btn ghost sm" data-edit="${t.id}">${icon('edit')}</button> <button class="btn ghost sm" data-toggle="${t.id}" data-cur="${t.active!==false}">${t.active!==false?'Deactivate':'Activate'}</button>${t.active===false?`<button class="btn danger sm" data-delete="${t.id}" style="margin-left:6px;">${icon('trash')}</button>`:''}</td>
-      </tr>`).join('') : `<tr><td colspan="6" class="empty">No tanks yet.</td></tr>`}</tbody>
+      </tr>`).join('') : `<tr><td colspan="7" class="empty">No tanks yet.</td></tr>`}</tbody>
     </table></div></div>
   `;
+  $$('.tkRate', body).forEach(inp=>inp.addEventListener('input', ()=>{
+    const tr = inp.closest('tr');
+    const t = state.tanks.find(x=>x.id===tr.dataset.tank);
+    if (!t) return;
+    const rate = num(inp.value) || valuationRate(null, t.id, t.product);
+    tr.querySelector('.tkVal').textContent = money(num(t.currentStockL)*rate);
+  }));
+  if ($('#tkRatesSave')) $('#tkRatesSave').onclick = async ()=>{
+    const msg = $('#tkRatesMsg');
+    try{
+      for (const inp of $$('.tkRate', body)){
+        const id = inp.closest('tr').dataset.tank;
+        const t = state.tanks.find(x=>x.id===id);
+        const rate = num(inp.value);
+        if (!t || num(t.costRate)===rate) continue;
+        await state.db.doc('tanks/'+id).update({costRate:rate});
+        await logActivity({entity:'Tank', entityLabel:t.name, action:'edit', changes:[{field:'Cost rate', from:money(t.costRate), to:money(rate)}]});
+      }
+      msg.innerHTML = `<span style="color:var(--good);margin-left:8px;">Saved — opening and closing stock now value at these rates.</span>`;
+    }catch(e){ msg.innerHTML = `<span style="color:var(--critical);margin-left:8px;">${esc(e.message||'Could not save')}</span>`; }
+  };
   $$('[data-edit]', body).forEach(b=>b.onclick=()=>openSetupEditModal('tanks', b.dataset.edit));
   $('#tkAdd').onclick = async ()=>{
     const name = $('#tkName').value.trim();
@@ -4052,9 +4105,10 @@ function renderSetupTanks(body){
     await state.db.collection('tanks').add({
       name, product: $('#tkProduct').value, capacityL: num($('#tkCap').value),
       currentStockL: num($('#tkStock').value), openingStockL: num($('#tkStock').value),
+      costRate: num($('#tkCost').value),
       active:true, createdAt:new Date().toISOString(),
     });
-    await logActivity({entity:'Tank', entityLabel:name, action:'add'});
+    await logActivity({entity:'Tank', entityLabel:name, action:'add', summary: num($('#tkCost').value)?`Opening stock ${liters($('#tkStock').value)} at ${money($('#tkCost').value)}/L`:''});
     renderSetup($('#viewMount'));
   };
   $$('[data-toggle]', body).forEach(b=>b.onclick=async ()=>{
