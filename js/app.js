@@ -876,6 +876,21 @@ function countedCash(cashCount){
 function countedEntered(cashCount){
   return DENOMS.some(d=>String((cashCount||{})[d]??'').trim()!=='' && num((cashCount||{})[d])!==0);
 }
+// What a saved duty did with its cash. Duties saved before counted cash was posted carry no
+// cashPosted/variance, but they do carry the denomination count — so the figures are derived from
+// that, and reports show the shortage without every duty having to be opened and saved again.
+// `postedHistorically` is what actually reached the ledger at the time, which is what a reversal
+// must undo.
+function dutyCashInfo(duty){
+  const pay = (duty && duty.pay) || {};
+  const expected = num(pay.cash);
+  const hasCount = countedEntered(duty && duty.cashCount);
+  const counted = hasCount ? countedCash(duty.cashCount) : null;
+  const posted = pay.cashPosted!=null ? num(pay.cashPosted) : (hasCount ? counted : expected);
+  const variance = pay.variance!=null ? num(pay.variance) : (hasCount ? counted - expected : 0);
+  return {expected, counted, hasCount, posted, variance,
+          postedHistorically: pay.cashPosted!=null ? num(pay.cashPosted) : expected};
+}
 let dutyForm = null;      // null = list view; object = add/edit form
 let dutyListDate = todayStr();
 
@@ -2825,7 +2840,7 @@ async function computeReport(from, to, f){
         r.nozzleRows.push({date:doc.date, staffName:x.staffName, nozzle: nz?nz.name:nid, tankId:n.tankId, product:n.product, opening:n.opening, closing:n.closing, testLiters:n.testLiters, transferLiters:n.transferLiters, liters:n.liters, rate:n.rate, amount:n.amount});
       });
       if (r.payTotals){ const p = x.pay||{}; r.payTotals.pos += num(p.pos); r.payTotals.upi += num(p.upi); r.payTotals.hpCard += num(p.hpCard); r.payTotals.credit += num(p.credit); r.payTotals.cash += num(p.cash); r.payTotals.expenses += num(p.expenses); }
-      r.cashVariance += num((x.pay||{}).variance);
+      r.cashVariance += dutyCashInfo(x).variance;
       r.duties.push(Object.assign({date:doc.date, id:dutyId, fuelAmount:dFuel, oilAmount:dOil, liters:dLtr}, {staffName:x.staffName, startTime:x.startTime, endTime:x.endTime, nozzleCount:(x.nozzleIds||[]).length, total:dFuel+dOil, pay:x.pay||{}}));
       if (!entryFiltered){
         (x.creditSales||[]).forEach(c=>{ if (!f.creditor || c.creditorId===f.creditor) r.creditSales.push(Object.assign({date:doc.date, staffName:x.staffName}, c)); });
@@ -2924,8 +2939,8 @@ function buildLedgerPostings(r){
   const add = (key, date, particulars, dr, cr, ref)=>{ if (key && (num(dr)||num(cr))) p.push({key, date, particulars, dr:num(dr), cr:num(cr), ref:ref||''}); };
   r.duties.forEach(d=>{
     const who = `Duty — ${d.staffName}`;
-    const posted = d.pay.cashPosted!=null ? num(d.pay.cashPosted) : num(d.pay.cash);
-    if (posted) add('cash', d.date, who + (num(d.pay.variance)?' (counted)':''), posted, 0);
+    const ci = dutyCashInfo(d);
+    if (ci.posted) add('cash', d.date, who + (ci.hasCount ? ' (counted)' : ''), ci.posted, 0);
     if (num(d.pay.pos)+num(d.pay.upi) && d.pay.bankAccountId) add('acct:'+d.pay.bankAccountId, d.date, who+' (POS + UPI)', num(d.pay.pos)+num(d.pay.upi), 0);
     if (num(d.pay.hpCard)){ const k = hpCardTargetKey(); if (k) add(k, d.date, who+' (HP Card)', d.pay.hpCard, 0); }
   });
@@ -5353,10 +5368,27 @@ function renderSetupTools(body){
       for (let i=0;i<36;i++){ months.push(cursor); cursor = shiftMonth(cursor,-1); }
       let dutyCash=0, receiptCash=0, journalCash=0, paidCash=0;
       const logsSnap = await state.db.collection('dailyLogs').limit(1000).get();
-      logsSnap.docs.forEach(d=>Object.values(d.data().duties||{}).forEach(x=>{
-        const p = x.pay || {};
-        dutyCash += p.cashPosted!=null ? num(p.cashPosted) : num(p.cash);   // counted where a count was taken
-      }));
+      // Duties saved before counted cash was posted are brought into line here: the counted figure
+      // and its variance are written onto them from the denomination count they already hold, so
+      // reports and the rebuilt balance agree from now on.
+      let migrated = 0;
+      for (const doc of logsSnap.docs){
+        const data = cloneDoc(doc.data());
+        let changed = false;
+        Object.values(data.duties||{}).forEach(x=>{
+          const ci = dutyCashInfo(x);
+          dutyCash += ci.posted;
+          if (x.pay && x.pay.cashPosted==null && ci.hasCount){
+            x.pay.counted = ci.counted; x.pay.variance = ci.variance; x.pay.cashPosted = ci.posted;
+            changed = true; migrated++;
+          }
+        });
+        if (changed){
+          await state.db.doc('dailyLogs/'+doc.id).set(data);
+          state.dailyLogsCache[doc.id] = data;
+          delete state.monthLogsCache[monthIdOf(doc.id)];
+        }
+      }
       for (const m of months){
         const r = await state.db.doc('receiptsMonthly/'+m).get();
         if (r.exists) (r.data().items||[]).forEach(it=>{ if ((it.into||'cash')==='cash') receiptCash += num(it.amount); });
@@ -5368,7 +5400,7 @@ function renderSetupTools(body){
       const balance = num(cashLedger.openingBalance) + dutyCash + receiptCash - paidCash + journalCash;
       await state.db.doc('ledgers/'+cashLedger.id).update({balance});
       await logActivity({entity:'Ledger', entityLabel:'Cash in hand', action:'edit', changes:[{field:'Balance', from:ledgerBalanceLabel(cashLedger.balance), to:ledgerBalanceLabel(balance)}], summary:'Recalculated from history'});
-      msg.innerHTML = `<span style="color:var(--good)">Done — Cash in hand is now ${ledgerBalanceLabel(balance)} (opening ${money(cashLedger.openingBalance)} + duty cash ${money(dutyCash)} + receipts ${money(receiptCash)} − payments/expenses from cash ${money(paidCash)} ${journalCash<0?'−':'+'} journal ${money(Math.abs(journalCash))}).</span>`;
+      msg.innerHTML = `<span style="color:var(--good)">Done — Cash in hand is now ${ledgerBalanceLabel(balance)} (opening ${money(cashLedger.openingBalance)} + duty cash ${money(dutyCash)} + receipts ${money(receiptCash)} − payments/expenses from cash ${money(paidCash)} ${journalCash<0?'−':'+'} journal ${money(Math.abs(journalCash))}).${migrated?` ${migrated} earlier duty line(s) were brought onto their counted cash.`:''}</span>`;
     }catch(e){ msg.innerHTML = `<span style="color:var(--critical)">${esc(e.message||'Failed')}</span>`; }
   };
   $('#toolRecalc').onclick = async ()=>{
