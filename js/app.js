@@ -4715,7 +4715,7 @@ function renderSetupTanks(body){
         <td class="num">${liters(t.capacityL)}</td><td class="num">${liters(t.currentStockL)}</td>
         <td class="num">${num(t.costRate)?money(t.costRate):'—'}</td>
         <td><span class="pill ${t.active!==false?'good':'neutral'}">${t.active!==false?'Active':'Inactive'}</span></td>
-        <td><button class="btn ghost sm" data-edit="${t.id}">${icon('edit')}</button> <button class="btn ghost sm" data-toggle="${t.id}" data-cur="${t.active!==false}">${t.active!==false?'Deactivate':'Activate'}</button>${t.active===false?`<button class="btn danger sm" data-delete="${t.id}" style="margin-left:6px;">${icon('trash')}</button>`:''}</td>
+        <td><button class="btn ghost sm" data-openstock="${t.id}">Opening stock</button> <button class="btn ghost sm" data-edit="${t.id}">${icon('edit')}</button> <button class="btn ghost sm" data-toggle="${t.id}" data-cur="${t.active!==false}">${t.active!==false?'Deactivate':'Activate'}</button>${t.active===false?`<button class="btn danger sm" data-delete="${t.id}" style="margin-left:6px;">${icon('trash')}</button>`:''}</td>
       </tr>`).join('') : `<tr><td colspan="7" class="empty">No tanks yet.</td></tr>`}</tbody>
     </table></div></div>
   `;
@@ -4740,6 +4740,7 @@ function renderSetupTanks(body){
       msg.innerHTML = `<span style="color:var(--good);margin-left:8px;">Saved — opening and closing stock now value at these rates.</span>`;
     }catch(e){ msg.innerHTML = `<span style="color:var(--critical);margin-left:8px;">${esc(e.message||'Could not save')}</span>`; }
   };
+  $$('[data-openstock]', body).forEach(b=>b.onclick=()=>openTankOpeningModal(b.dataset.openstock));
   $$('[data-edit]', body).forEach(b=>b.onclick=()=>openSetupEditModal('tanks', b.dataset.edit));
   $('#tkAdd').onclick = async ()=>{
     const name = $('#tkName').value.trim();
@@ -4766,6 +4767,95 @@ function renderSetupTanks(body){
   });
 }
 
+
+// Litres in and out of a tank from `fromDate` to today: deliveries and transfers in, less what the
+// nozzles drew. Used to set a tank's current stock from a dipped opening figure.
+async function tankMovementSince(tankId, fromDate){
+  let received = 0, drawn = 0, transferredIn = 0;
+  let m = monthIdOf(fromDate);
+  const last = monthIdOf(todayStr());
+  for (let i=0; i<=60 && m<=last; i++){
+    const st = await getMonthDoc('stockReceiptsMonthly', m);
+    ((st&&st.items)||[]).forEach(it=>{ if (it.tankId===tankId && it.date>=fromDate) received += num(it.liters); });
+    (await getMonthDailyLogs(m)).forEach(doc=>{
+      if (!doc.date || doc.date < fromDate) return;
+      Object.values(doc.duties||{}).forEach(d=>Object.values(d.nozzles||{}).forEach(nz=>{
+        const draw = nz.drawLiters!=null ? nz.drawLiters : nz.liters;
+        if (nz.tankId===tankId) drawn += num(draw);
+        if (nz.transferToTankId===tankId) transferredIn += num(nz.transferLiters);
+      }));
+    });
+    m = shiftMonth(m, 1);
+  }
+  return {received, drawn, transferredIn, net: received + transferredIn - drawn};
+}
+function openTankOpeningModal(tankId){
+  const root = $('#modalRoot');
+  const tank = state.tanks.find(t=>t.id===tankId);
+  if (!root || !tank) return;
+  const defDate = tank.openingStockDate || (monthIdOf(todayStr())+'-01');
+  root.innerHTML = `<div class="modal-backdrop" id="mbDrop">
+    <div class="modal">
+      <h3>Opening stock — ${esc(tank.name)}</h3>
+      <p style="font-size:13px;color:var(--text-muted);margin:0 0 14px;">The dip reading for this tank on a given date. Deliveries and sales recorded since are applied to it, so the current stock follows and a recalculation rebuilds from the right starting point.</p>
+      <div class="field"><label>Stock was (L)</label><input type="number" step="0.01" id="tsQty" value="${num(tank.openingStockL)||''}" placeholder="0.00"></div>
+      <div class="field"><label>As at (start of this day)</label><input type="date" id="tsDate" value="${defDate}" max="${todayStr()}"></div>
+      <div class="field"><label>Cost rate of that stock (₹/L, optional)</label><input type="number" step="0.01" id="tsRate" value="${num(tank.costRate)||''}" placeholder="0.00"></div>
+      <div class="card card-pad" style="background:var(--surface-2);margin-bottom:12px;">
+        <div class="row" style="justify-content:space-between;font-size:13px;"><span>Received since</span><strong class="mono" id="tsIn">—</strong></div>
+        <div class="row" style="justify-content:space-between;font-size:13px;margin-top:4px;"><span>Dispensed since</span><strong class="mono" id="tsOut">—</strong></div>
+        <div class="row" style="justify-content:space-between;font-size:13px;margin-top:4px;"><span>Current stock would become</span><strong class="mono" id="tsNew">—</strong></div>
+        <div class="row" style="justify-content:space-between;font-size:12.5px;margin-top:4px;color:var(--text-muted);"><span>Current stock now</span><span class="mono">${liters(tank.currentStockL)}</span></div>
+      </div>
+      <div id="tsMsg" style="font-size:13px;color:var(--critical);"></div>
+      <div class="modal-actions">
+        <button class="btn" id="tsCancel">Cancel</button>
+        <button class="btn primary" id="tsSave">Set opening stock</button>
+      </div>
+    </div>
+  </div>`;
+  $('#tsCancel').onclick = closeModal;
+  $('#mbDrop').addEventListener('click', (e)=>{ if (e.target.id==='mbDrop') closeModal(); });
+  let mv = {received:0, drawn:0, transferredIn:0, net:0};
+  const show = ()=>{
+    const total = num($('#tsQty').value) + mv.net;
+    $('#tsNew').innerHTML = liters(total) + (total<0 ? ' <span class="pill critical">negative</span>' : '');
+  };
+  const recalc = async ()=>{
+    const from = $('#tsDate').value;
+    if (!from) return;
+    $('#tsIn').textContent = $('#tsOut').textContent = 'calculating…';
+    mv = await tankMovementSince(tankId, from);
+    $('#tsIn').textContent = liters(mv.received + mv.transferredIn);
+    $('#tsOut').textContent = liters(mv.drawn);
+    show();
+  };
+  $('#tsDate').onchange = recalc;
+  $('#tsQty').oninput = show;
+  recalc();
+  $('#tsSave').onclick = async ()=>{
+    if (!state.dbReady){ $('#tsMsg').textContent = "Live data isn't connected."; return; }
+    const from = $('#tsDate').value;
+    if (!from){ $('#tsMsg').textContent = 'Pick the date this reading applies to.'; return; }
+    $('#tsSave').disabled = true;
+    try{
+      mv = await tankMovementSince(tankId, from);
+      const opening = num($('#tsQty').value);
+      const patch = {openingStockL:opening, openingStockDate:from, currentStockL: opening + mv.net};
+      if (num($('#tsRate').value)) patch.costRate = num($('#tsRate').value);
+      await state.db.doc('tanks/'+tankId).update(patch);
+      await logActivity({entity:'Tank', entityLabel:tank.name, action:'edit',
+        changes:[{field:'Opening stock', from:liters(tank.openingStockL), to:`${liters(opening)} as at ${fmtDateLabel(from)}`},
+                 {field:'Current stock', from:liters(tank.currentStockL), to:liters(opening + mv.net)}]});
+      closeModal();
+      try{ if ($('#viewMount')) renderSetup($('#viewMount')); }catch(e){}
+    }catch(e){
+      const msg = $('#tsMsg'), btn = $('#tsSave');
+      if (msg) msg.textContent = 'Could not save: '+(e.message||'error');
+      if (btn) btn.disabled = false;
+    }
+  };
+}
 function renderSetupNozzles(body){
   const activeTanks = state.tanks.filter(t=>t.active!==false);
   body.innerHTML = `
@@ -5478,6 +5568,12 @@ function renderSetupTools(body){
     const msg = $('#toolMsg');
     msg.textContent = 'Recalculating…';
     try{
+      // A tank whose opening stock was dipped on a date only counts what moved from that date on —
+      // otherwise history from before the dip would be subtracted from it a second time.
+      const afterOpening = (tankId, date)=>{
+        const t = state.tanks.find(x=>x.id===tankId);
+        return !t || !t.openingStockDate || (date && date >= t.openingStockDate);
+      };
       const receiptsByTank = {};
       const monthsToScan = new Set();
       const now = new Date();
@@ -5485,7 +5581,7 @@ function renderSetupTools(body){
       for (let i=0;i<36;i++){ monthsToScan.add(cursor); cursor = shiftMonth(cursor,-1); }
       for (const m of monthsToScan){
         const snap = await state.db.doc('stockReceiptsMonthly/'+m).get();
-        if (snap.exists){ (snap.data().items||[]).forEach(it=>{ receiptsByTank[it.tankId] = (receiptsByTank[it.tankId]||0)+num(it.liters); }); }
+        if (snap.exists){ (snap.data().items||[]).forEach(it=>{ if (afterOpening(it.tankId, it.date)) receiptsByTank[it.tankId] = (receiptsByTank[it.tankId]||0)+num(it.liters); }); }
       }
       const soldByTank = {};
       const transferredInByTank = {};
@@ -5500,8 +5596,9 @@ function renderSetupTools(body){
             // drawLiters (sale + stock transfer) is what actually left the source tank; older
             // entries saved before stock transfers existed only have `liters`, which meant the same thing.
             const draw = nz.drawLiters!=null ? nz.drawLiters : nz.liters;
-            if (nz.tankId) soldByTank[nz.tankId] = (soldByTank[nz.tankId]||0) + num(draw);
-            if (nz.transferToTankId) transferredInByTank[nz.transferToTankId] = (transferredInByTank[nz.transferToTankId]||0) + num(nz.transferLiters);
+            const dutyDate = data.date || d.id;
+            if (nz.tankId && afterOpening(nz.tankId, dutyDate)) soldByTank[nz.tankId] = (soldByTank[nz.tankId]||0) + num(draw);
+            if (nz.transferToTankId && afterOpening(nz.transferToTankId, dutyDate)) transferredInByTank[nz.transferToTankId] = (transferredInByTank[nz.transferToTankId]||0) + num(nz.transferLiters);
             if (nz.closing!=null){
               const date = data.date || d.id;
               const seen = lastByNozzle[nid];
@@ -5518,11 +5615,19 @@ function renderSetupTools(body){
         nz.lastClosing = info.value; nz.lastReadingDate = info.date;
         nozzlesFixed++;
       }
+      // A tank that ends up negative has sold more than its opening stock plus its deliveries — the
+      // opening stock or some purchases are missing, so it is left untouched and reported rather
+      // than overwritten with a figure that cannot be true.
+      const skipped = [];
       for (const t of state.tanks){
         const newStock = num(t.openingStockL) + (receiptsByTank[t.id]||0) + (transferredInByTank[t.id]||0) - (soldByTank[t.id]||0);
+        if (newStock < 0){ skipped.push({name:t.name, would:newStock, sold:(soldByTank[t.id]||0), opening:num(t.openingStockL), received:(receiptsByTank[t.id]||0)}); continue; }
         await state.db.doc('tanks/'+t.id).update({currentStockL: newStock});
       }
-      msg.innerHTML = `<span style="color:var(--good)">Done — tank stock recalculated from history (including stock transfers between tanks).${nozzlesFixed?` &nbsp;${nozzlesFixed} nozzle last-reading(s) corrected.`:''}</span>`;
+      msg.innerHTML = `<span style="color:var(--good)">Done — tank stock recalculated from history (including stock transfers between tanks).${nozzlesFixed?` &nbsp;${nozzlesFixed} nozzle last-reading(s) corrected.`:''}</span>`
+        + (skipped.length ? `<div class="banner" style="margin-top:10px;">${icon('tank')}<div><strong>${esc(skipped.map(s=>s.name).join(', '))}</strong> would come out negative, so ${skipped.length>1?'they were':'it was'} left unchanged.
+            ${skipped.map(s=>`<div style="font-size:12.5px;margin-top:4px;">${esc(s.name)}: opening ${liters(s.opening)} + received ${liters(s.received)} − dispensed ${liters(s.sold)} = <strong>${liters(s.would)}</strong></div>`).join('')}
+            <div style="font-size:12.5px;margin-top:6px;">Either the opening stock was never entered or some deliveries are missing. Set the dip reading with <strong>Opening stock</strong> on the tank, or record the purchases, then run this again.</div></div></div>` : '');
     }catch(e){ msg.innerHTML = `<span style="color:var(--critical)">${esc(e.message||'Failed')}</span>`; }
   };
 }
