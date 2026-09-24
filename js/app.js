@@ -360,6 +360,7 @@ const state = {
   ratesFlat: {},        // 'YYYY-MM-DD' -> {p1,r2,p3}
   ratesLoadedMonths: new Set(),
   activeMonth: monthIdOf(todayStr()),
+  dashDate: todayStr(),
   view: 'dashboard',
   setupTab: 'tanks',
   monthCache: {},       // collectionName -> {monthId: data}
@@ -805,36 +806,65 @@ function offlineNotice(){
 
 /* ============================== DASHBOARD ============================== */
 function renderDashboard(mount){
-  const log = state.todayLog;
+  const date = state.dashDate || todayStr();
+  const isToday = date === todayStr();
+  // Today's figures come from the live listener; any other day is fetched and cached.
+  const log = isToday ? state.todayLog : state.dailyLogsCache[date];
+  const loading = !isToday && log === undefined;
   const dayAmount = log ? (log.dayAmount||0) : 0;
   const dayLiters = log ? (log.dayLiters||0) : 0;
   const duties = log ? Object.values(log.duties||{}) : [];
+  const when = isToday ? 'today' : 'that day';
 
   mount.innerHTML = `
-    <h1 class="page-title">Today, ${fmtDateLabel(todayStr())}</h1>
-    <p class="page-sub">${esc(state.config.stationName||'')}</p>
+    <div class="row" style="justify-content:space-between;align-items:flex-end;">
+      <div>
+        <h1 class="page-title">${isToday?'Today, ':''}${fmtDateLabel(date)}</h1>
+        <p class="page-sub" style="margin-bottom:0;">${esc(state.config.stationName||'')}</p>
+      </div>
+      <div class="row" style="gap:6px;">
+        <button class="btn ghost sm" id="dashPrev" title="Previous day">${icon('chevL')}</button>
+        <input type="date" id="dashDate" value="${date}" max="${todayStr()}" style="width:150px;">
+        <button class="btn ghost sm" id="dashNext" ${isToday?'disabled':''} title="Next day">${icon('chevR')}</button>
+        ${isToday?'':`<button class="btn ghost sm" id="dashToday">Today</button>`}
+      </div>
+    </div>
 
-    <div class="grid grid-kpi">
-      <div class="card kpi"><div class="label">Sales today</div><div class="value">${money(dayAmount)}</div><div class="foot">${liters(dayLiters)} dispensed</div></div>
-      <div class="card kpi"><div class="label">Duties logged today</div><div class="value">${duties.length}</div><div class="foot">${duties.length? duties.map(d=>esc(d.staffName)).join(', ') : 'none yet'}</div></div>
+    <div class="grid grid-kpi" style="margin-top:16px;">
+      <div class="card kpi"><div class="label">Sales ${esc(when)}</div><div class="value">${loading?'…':money(dayAmount)}</div><div class="foot">${loading?'loading':liters(dayLiters)+' dispensed'}</div></div>
+      <div class="card kpi"><div class="label">Duties logged</div><div class="value">${loading?'…':duties.length}</div><div class="foot">${loading?'loading':(duties.length? duties.map(d=>esc(d.staffName)).join(', ') : 'none yet')}</div></div>
       <div class="card kpi"><div class="label">Active nozzles</div><div class="value">${state.nozzles.filter(n=>n.active!==false).length}</div><div class="foot">across ${state.tanks.filter(t=>t.active!==false).length} tanks</div></div>
       <div class="card kpi"><div class="label">Staff on roll</div><div class="value">${state.staff.filter(s=>s.active!==false).length}</div><div class="foot">active</div></div>
     </div>
 
-    <div class="section-head"><h2>Tank stock</h2><span class="hint">updates as duties are saved</span></div>
+    <div class="section-head"><h2>Tank stock</h2><span class="hint">live, updates as duties are saved</span></div>
     <div class="grid grid-2" id="dashTanks"></div>
 
     <div class="section-head"><h2>Quick actions</h2></div>
     <div class="row">
-      <button class="btn primary" id="qaShift">${icon('pump')} Log a duty</button>
+      <button class="btn primary" id="qaShift">${icon('pump')} Log a duty${isToday?'':' for '+esc(fmtDateLabel(date))}</button>
       <button class="btn" id="qaExpense">${icon('receipt')} Log a payment / expense</button>
       <button class="btn" id="qaStock">${icon('truck')} Record fuel purchase</button>
     </div>
   `;
   renderTankCards($('#dashTanks'), {compact:true});
-  $('#qaShift').onclick = ()=>{ state.view='shift'; renderAll(); };
+  const go = (d)=>{ if (d > todayStr()) return; state.dashDate = d; loadDashDate(d); };
+  $('#dashDate').onchange = (e)=>go(e.target.value);
+  $('#dashPrev').onclick = ()=>go(addDays(date,-1));
+  $('#dashNext').onclick = ()=>go(addDays(date,1));
+  if ($('#dashToday')) $('#dashToday').onclick = ()=>go(todayStr());
+  // Opening Duty Entry from a past day lands on that day's list, which is what you want next.
+  $('#qaShift').onclick = ()=>{ dutyListDate = date; dutyForm = null; state.view='shift'; renderAll(); };
   $('#qaExpense').onclick = ()=>{ state.view='expenses'; renderAll(); };
   $('#qaStock').onclick = ()=>{ state.view='purchase'; renderAll(); };
+}
+// Fetches a past day's log, then redraws — today's is already kept live by its own listener.
+async function loadDashDate(date){
+  renderCurrentView();
+  if (date !== todayStr() && state.dailyLogsCache[date] === undefined){
+    await getDailyLog(date);
+    if (state.view === 'dashboard' && state.dashDate === date) renderCurrentView();
+  }
 }
 
 function tankLevelStatus(pct){
