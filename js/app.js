@@ -868,6 +868,14 @@ function renderTankCards(el, opts){
 
 /* ============================== DUTY ENTRY ============================== */
 const DENOMS = [500,200,100,50,20,10,5,2,1];
+// Total of the denomination count, and whether a count was entered at all — an all-blank count
+// means nobody counted, which is different from counting zero.
+function countedCash(cashCount){
+  return DENOMS.reduce((s,d)=>s + d*num((cashCount||{})[d]), 0);
+}
+function countedEntered(cashCount){
+  return DENOMS.some(d=>String((cashCount||{})[d]??'').trim()!=='' && num((cashCount||{})[d])!==0);
+}
 let dutyForm = null;      // null = list view; object = add/edit form
 let dutyListDate = todayStr();
 
@@ -1392,7 +1400,8 @@ function recomputePayments(){
   if (varEl){
     const diff = counted - cash;
     const cls = Math.abs(diff)<0.5 ? 'good' : (Math.abs(diff)<=50?'warning':'critical');
-    varEl.innerHTML = `<span class="hint">Variance vs expected cash</span><span class="pill ${cls}">${diff>=0?'+':''}${money(diff)}</span>`;
+    const counted2 = countedEntered(dutyForm.cashCount);
+    varEl.innerHTML = `<span class="hint">Variance vs expected cash${counted2 ? ` <span style="color:var(--text-faint);font-size:11.5px;">— ${money(counted)} goes to Cash in hand; the ${diff<0?'shortfall':'excess'} is carried to the P&amp;L</span>` : ''}</span><span class="pill ${cls}">${diff>=0?'+':''}${money(diff)}</span>`;
   }
 }
 
@@ -1475,9 +1484,17 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
   const oilAmount = (oils||[]).reduce((s,o)=>s+num(o.amount),0);
   dutyAmount = fuelAmount + oilAmount;
   const cash = dutyAmount - (pay.pos||0) - (pay.upi||0) - (pay.hpCard||0) - credit - expenseTotal;
+  // What the till should hold is `cash`; what was actually counted is the denomination total. When a
+  // count has been entered it is the counted figure that goes into Cash in hand, because that is the
+  // money the station really has — the shortfall or excess is carried to the P&L instead.
+  const counted = countedCash(cashCount);
+  const hasCount = countedEntered(cashCount);
+  const cashPosted = hasCount ? counted : cash;
+  const variance = hasCount ? counted - cash : 0;
   data.duties[id] = {
     staffId, staffName, startTime, endTime, nozzleIds, nozzles: entries, dutyAmount, fuelAmount, oilAmount, dutyLiters,
-    pay: {pos:pay.pos||0, upi:pay.upi||0, hpCard:pay.hpCard||0, bankAccountId:pay.bankAccountId||'', credit, expenses:expenseTotal, cash},
+    pay: {pos:pay.pos||0, upi:pay.upi||0, hpCard:pay.hpCard||0, bankAccountId:pay.bankAccountId||'', credit, expenses:expenseTotal,
+          cash, counted: hasCount ? counted : null, variance, cashPosted},
     creditSales, expenses: expenses||[], oils: oils||[], cashCount, savedAt: new Date().toISOString(),
   };
   data.date = date;
@@ -1623,7 +1640,9 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
   // The duty's cash takings (after till expenses) go into the Cash in hand ledger — only the CHANGE
   // since this duty's last save, so re-saving an edit never double-counts. Bank deposits of that
   // cash are recorded via Journal (Dr Bank, Cr Cash in hand) or Receipts.
-  const cashDelta = cash - num(prevPay.cash);
+  // Older duties stored no cashPosted; their cash figure was what went in.
+  const prevPosted = prevPay.cashPosted!=null ? num(prevPay.cashPosted) : num(prevPay.cash);
+  const cashDelta = cashPosted - prevPosted;
   if (cashDelta) await applyPosting('cash', cashDelta, {date, narration:`Duty cash — ${staffName}`, journalId:id});
 
   // HP Card sales are not paid to the station on the day — the oil company nets them off against
@@ -1706,7 +1725,8 @@ async function deleteDuty(date, dutyId){
     if (acct) await state.db.doc('accounts/'+acct.id).update({balance: num(acct.balance) - bankAmt}).catch(()=>{});
   }
   if (num(pay.hpCard)) await postHpCard(-num(pay.hpCard), {date, narration:`Deleted duty — ${d.staffName}`, journalId:dutyId});
-  if (num(pay.cash)) await applyPosting('cash', -num(pay.cash), {date, narration:`Deleted duty — ${d.staffName}`, journalId:dutyId});
+  const postedBack = pay.cashPosted!=null ? num(pay.cashPosted) : num(pay.cash);
+  if (postedBack) await applyPosting('cash', -postedBack, {date, narration:`Deleted duty — ${d.staffName}`, journalId:dutyId});
 
   delete data.duties[dutyId];
   let dayAmount=0, dayLiters=0;
@@ -2785,7 +2805,7 @@ async function computeReport(from, to, f){
   const r = { from, to, days:daysBetween(from,to), revenue:0, fuelRevenue:0, oilRevenue:0, liters:0,
     byProduct:{p1:{liters:0,amount:0}, p2:{liters:0,amount:0}, p3:{liters:0,amount:0}}, byDay:{},
     payTotals: entryFiltered ? null : {pos:0, upi:0, hpCard:0, credit:0, cash:0, expenses:0},
-    duties:[], creditSales:[], oils:[], purchases:[], oilPurchases:[], expenses:[], payments:[], salaryRows:[], salary:0, salaryPaid:0, salaryAdvance:0, journal:[], receipts:[], nozzleRows:[] };
+    cashVariance:0, duties:[], creditSales:[], oils:[], purchases:[], oilPurchases:[], expenses:[], payments:[], salaryRows:[], salary:0, salaryPaid:0, salaryAdvance:0, journal:[], receipts:[], nozzleRows:[] };
   dayDocs.forEach(doc=>{
     Object.entries(doc.duties||{}).forEach(([dutyId,x])=>{
       if (f.staff && x.staffId!==f.staff) return;
@@ -2805,6 +2825,7 @@ async function computeReport(from, to, f){
         r.nozzleRows.push({date:doc.date, staffName:x.staffName, nozzle: nz?nz.name:nid, tankId:n.tankId, product:n.product, opening:n.opening, closing:n.closing, testLiters:n.testLiters, transferLiters:n.transferLiters, liters:n.liters, rate:n.rate, amount:n.amount});
       });
       if (r.payTotals){ const p = x.pay||{}; r.payTotals.pos += num(p.pos); r.payTotals.upi += num(p.upi); r.payTotals.hpCard += num(p.hpCard); r.payTotals.credit += num(p.credit); r.payTotals.cash += num(p.cash); r.payTotals.expenses += num(p.expenses); }
+      r.cashVariance += num((x.pay||{}).variance);
       r.duties.push(Object.assign({date:doc.date, id:dutyId, fuelAmount:dFuel, oilAmount:dOil, liters:dLtr}, {staffName:x.staffName, startTime:x.startTime, endTime:x.endTime, nozzleCount:(x.nozzleIds||[]).length, total:dFuel+dOil, pay:x.pay||{}}));
       if (!entryFiltered){
         (x.creditSales||[]).forEach(c=>{ if (!f.creditor || c.creditorId===f.creditor) r.creditSales.push(Object.assign({date:doc.date, staffName:x.staffName}, c)); });
@@ -2867,8 +2888,12 @@ async function computeReport(from, to, f){
   r.closingStock = await stockSnapshot(to);
   r.stockChange = r.closingStock.totalValue - r.openingStock.totalValue;
   r.grossMargin = r.revenue + r.closingStock.totalValue - r.openingStock.totalValue - r.purchaseTotal;
-  r.totalExpenses = r.expenseTotal + r.salary + r.otherExpense;
-  r.net = r.grossMargin + r.otherIncome - r.totalExpenses;
+  // A till that came up short is a cost; one that came up over is a small gain. Both belong in the
+  // P&L, because the cash ledger already holds the counted figure rather than the expected one.
+  r.cashShort = Math.max(0, -r.cashVariance);
+  r.cashOver = Math.max(0, r.cashVariance);
+  r.totalExpenses = r.expenseTotal + r.salary + r.otherExpense + r.cashShort;
+  r.net = r.grossMargin + r.otherIncome + r.cashOver - r.totalExpenses;
   return r;
 }
 
@@ -2899,7 +2924,8 @@ function buildLedgerPostings(r){
   const add = (key, date, particulars, dr, cr, ref)=>{ if (key && (num(dr)||num(cr))) p.push({key, date, particulars, dr:num(dr), cr:num(cr), ref:ref||''}); };
   r.duties.forEach(d=>{
     const who = `Duty — ${d.staffName}`;
-    if (num(d.pay.cash)) add('cash', d.date, who, d.pay.cash, 0);
+    const posted = d.pay.cashPosted!=null ? num(d.pay.cashPosted) : num(d.pay.cash);
+    if (posted) add('cash', d.date, who + (num(d.pay.variance)?' (counted)':''), posted, 0);
     if (num(d.pay.pos)+num(d.pay.upi) && d.pay.bankAccountId) add('acct:'+d.pay.bankAccountId, d.date, who+' (POS + UPI)', num(d.pay.pos)+num(d.pay.upi), 0);
     if (num(d.pay.hpCard)){ const k = hpCardTargetKey(); if (k) add(k, d.date, who+' (HP Card)', d.pay.hpCard, 0); }
   });
@@ -3307,10 +3333,12 @@ function renderReportBody(body, cfg, r, c){
     r.expenses.forEach(it=>{ const k = it.category || 'Other'; byHead[k] = (byHead[k]||0) + num(it.amount); });
     Object.entries(byHead).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>plDr.push([`To ${esc(k)}`, v]));
     if (num(r.salary)) plDr.push(['To Salary', r.salary]);
+    if (num(r.cashShort)) plDr.push(['To Cash shortage (till count)', r.cashShort]);
     Object.entries(r.otherExpenseDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1])
       .forEach(([k,v])=>plDr.push([`To ${esc(k)}`, v]));
     // Nothing at all on the debit side still needs a line, so the account reads sensibly.
     if (!plDr.length) plDr.push(['To Expenses', 0]);
+    if (num(r.cashOver)) plCr.push(['By Cash excess (till count)', r.cashOver]);
     const incomeHeads = Object.entries(r.otherIncomeDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]);
     if (incomeHeads.length) incomeHeads.forEach(([k,v])=>plCr.push([`By ${esc(k)}`, v]));
     else plCr.push(['By Other income', r.otherIncome]);
@@ -3677,8 +3705,10 @@ function exportReportExcel(rep){
           r.expenses.forEach(it=>{ const k = it.category || 'Other'; byHead[k] = (byHead[k]||0) + num(it.amount); });
           Object.entries(byHead).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>dr.push([`To ${k}`, r2(v)]));
           if (num(r.salary)) dr.push(['To Salary', r2(r.salary)]);
+          if (num(r.cashShort)) dr.push(['To Cash shortage (till count)', r2(r.cashShort)]);
           Object.entries(r.otherExpenseDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>dr.push([`To ${k}`, r2(v)]));
           if (!dr.length) dr.push(['To Expenses', 0]);
+          if (num(r.cashOver)) cr.push(['By Cash excess (till count)', r2(r.cashOver)]);
           const incHeads = Object.entries(r.otherIncomeDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]);
           if (incHeads.length) incHeads.forEach(([k,v])=>cr.push([`By ${k}`, r2(v)]));
           else cr.push(['By Other income', r2(r.otherIncome)]);
@@ -5323,7 +5353,10 @@ function renderSetupTools(body){
       for (let i=0;i<36;i++){ months.push(cursor); cursor = shiftMonth(cursor,-1); }
       let dutyCash=0, receiptCash=0, journalCash=0, paidCash=0;
       const logsSnap = await state.db.collection('dailyLogs').limit(1000).get();
-      logsSnap.docs.forEach(d=>Object.values(d.data().duties||{}).forEach(x=>{ dutyCash += num(x.pay && x.pay.cash); }));
+      logsSnap.docs.forEach(d=>Object.values(d.data().duties||{}).forEach(x=>{
+        const p = x.pay || {};
+        dutyCash += p.cashPosted!=null ? num(p.cashPosted) : num(p.cash);   // counted where a count was taken
+      }));
       for (const m of months){
         const r = await state.db.doc('receiptsMonthly/'+m).get();
         if (r.exists) (r.data().items||[]).forEach(it=>{ if ((it.into||'cash')==='cash') receiptCash += num(it.amount); });
