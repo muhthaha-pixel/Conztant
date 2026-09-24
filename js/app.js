@@ -1137,6 +1137,26 @@ function updateNozzleHint(limitHit){
   hint.style.color = limitHit ? 'var(--critical)' : 'var(--text-faint)';
 }
 
+// The reading a nozzle should open at on `date`: the closing of the most recent duty that used it
+// on or before that day, so entering 23 Sept picks up 22 Sept's close — and a second duty on the
+// same day picks up the first one's. Falls back to the nozzle's stored last reading. Scans back a
+// few months of daily logs, which are cached.
+async function lastClosingBefore(nozzleId, date, excludeDutyId){
+  let best = null;
+  let m = monthIdOf(date);
+  for (let i=0; i<4 && !best; i++){
+    const docs = (await getMonthDailyLogs(m)).filter(doc=>doc.date && doc.date <= date)
+      .sort((a,b)=>b.date.localeCompare(a.date));
+    for (const doc of docs){
+      const candidates = Object.entries(doc.duties||{})
+        .filter(([id,d])=> id!==excludeDutyId && d.nozzles && d.nozzles[nozzleId] && d.nozzles[nozzleId].closing!=null)
+        .sort((a,b)=>String((b[1].savedAt)||'').localeCompare(String((a[1].savedAt)||'')));
+      if (candidates.length){ best = {value:num(candidates[0][1].nozzles[nozzleId].closing), date:doc.date}; break; }
+    }
+    m = shiftMonth(m, -1);
+  }
+  return best;
+}
 async function renderDutyRows(){
   const el = $('#dfRows'); if(!el) return;
   // Reading rows follow the same pump order as the chips above, whatever order they were ticked in.
@@ -1158,7 +1178,9 @@ async function renderDutyRows(){
     const productKey = tank?tank.product:null;
     if (!dutyForm.rows[nid]){
       const rate = await getRateForDate(dutyForm.date, productKey);
-      dutyForm.rows[nid] = { opening:num(n.lastClosing), closing:'', testLiters:0, tankId:n.tankId, product:productKey, rate, transferOn:false, transferLiters:0, transferToTankId:'' };
+      const prior = await lastClosingBefore(nid, dutyForm.date, dutyForm.dutyId);
+      dutyForm.rows[nid] = { opening: prior ? prior.value : num(n.lastClosing), openingFrom: prior ? prior.date : null,
+        closing:'', testLiters:0, tankId:n.tankId, product:productKey, rate, transferOn:false, transferLiters:0, transferToTankId:'' };
     }
     const row = dutyForm.rows[nid];
     if (row.transferOn===undefined) row.transferOn = !!row.transferToTankId;
@@ -1167,7 +1189,7 @@ async function renderDutyRows(){
     tr.dataset.nozzle = nid;
     tr.innerHTML = `<td><strong>${esc(n.name)}</strong>${tank?`<div class="hint" style="font-size:11.5px;color:var(--text-faint)">${esc(tank.name)}</div>`:''}</td>
       <td class="num"><input type="number" step="0.01" class="rateIn" value="${row.rate??''}" placeholder="0.00" title="Rate for this nozzle on this duty — change it to override today's rate" style="width:115px;text-align:right;"></td>
-      <td class="num"><input type="number" step="0.01" class="opening" value="${row.opening??0}" style="width:140px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="opening" value="${row.opening??0}" style="width:140px;text-align:right;">${row.openingFrom?`<div class="hint" style="font-size:10.5px;color:var(--text-faint);text-align:right;">from ${esc(fmtDateLabel(row.openingFrom))}</div>`:''}</td>
       <td class="num"><input type="number" step="0.01" class="closing" value="${row.closing??''}" placeholder="0.00" style="width:140px;text-align:right;"></td>
       <td class="num"><input type="number" step="0.01" class="testL" value="${row.testLiters||0}" style="width:95px;text-align:right;"></td>
       <td>
@@ -1919,7 +1941,7 @@ function renderPurchase(mount){
         <td class="num">${money(s.openingBalance||0)}</td>
         <td class="num" ${num(s.balance)>0?'style="color:var(--critical);font-weight:600;"':''}>${money(s.balance||0)}</td>
         <td><span class="pill ${s.active!==false?'good':'neutral'}">${s.active!==false?'Active':'Inactive'}</span></td>
-        <td style="white-space:nowrap;"><button class="btn sm" data-pay="${s.id}">Pay</button> <button class="btn ghost sm" data-edit="${s.id}">${icon('edit')}</button> <button class="btn ghost sm" data-toggle="${s.id}" data-cur="${s.active!==false}">${s.active!==false?'Deactivate':'Activate'}</button>${s.active===false?` <button class="btn danger sm" data-delsup="${s.id}">${icon('trash')}</button>`:''}</td>
+        <td style="white-space:nowrap;"><button class="btn sm" data-pay="${s.id}">Pay</button> <button class="btn ghost sm" data-openbal="${s.id}">Opening</button> <button class="btn ghost sm" data-edit="${s.id}">${icon('edit')}</button> <button class="btn ghost sm" data-toggle="${s.id}" data-cur="${s.active!==false}">${s.active!==false?'Deactivate':'Activate'}</button>${s.active===false?` <button class="btn danger sm" data-delsup="${s.id}">${icon('trash')}</button>`:''}</td>
       </tr>`).join('') : `<tr><td colspan="6" class="empty">No suppliers yet.</td></tr>`}</tbody>
       ${state.suppliers.length?`<tfoot><tr><td colspan="3" style="font-weight:700;">Total owed</td><td class="num" style="font-weight:700;">${money(state.suppliers.reduce((s,x)=>s+num(x.balance),0))}</td><td colspan="2"></td></tr></tfoot>`:''}
     </table></div></div>
@@ -1930,6 +1952,7 @@ function renderPurchase(mount){
   $('#drRate').oninput = updateDrTotal;
   $('#drSave').onclick = addStockReceipt;
   $('#spAdd').onclick = addSupplierFromPurchase;
+  $$('#viewMount [data-openbal]').forEach(b=>b.onclick=()=>openOpeningBalanceModal('supplier', b.dataset.openbal));
   $$('#viewMount [data-edit]').forEach(b=>b.onclick=()=>openSetupEditModal('suppliers', b.dataset.edit));
   $$('#viewMount [data-toggle]').forEach(b=>b.onclick=async ()=>{ await state.db.doc('suppliers/'+b.dataset.toggle).update({active: b.dataset.cur!=='true'}); });
   $$('#viewMount [data-delsup]').forEach(b=>b.onclick=()=>deleteSupplier(b.dataset.delsup, ()=>renderPurchase($('#viewMount'))));
@@ -2922,13 +2945,16 @@ function ledgerGroupKeys(){
 }
 function ledgerAccountList(){
   const out = [];
+  // openingDate/openingBalance are carried through so a statement can be anchored to a confirmed
+  // figure. Supplier balances are held as "what we owe", the opposite sign to the debit-positive
+  // convention used here, so both the balance and its opening are flipped.
   const cash = state.ledgers.find(l=>l.cashInHand);
-  if (cash) out.push({key:'cash', label:'Cash in hand', group:'cashbank', balance:num(cash.balance), balanceKind:'dr'});
+  if (cash) out.push({key:'cash', label:'Cash in hand', group:'cashbank', balance:num(cash.balance), balanceKind:'dr', openingDate:cash.openingDate||'', openingBalance:cash.openingBalance});
   state.accounts.filter(a=>a.kind==='bank').forEach(a=>out.push({key:'acct:'+a.id, label:a.name+' (Bank)', group:'cashbank', balance:num(a.balance), balanceKind:'dr', openingDate:a.openingDate||'', openingBalance:a.openingBalance}));
-  state.accounts.filter(a=>a.kind==='receivable').forEach(a=>out.push({key:'acct:'+a.id, label:a.name, group:'creditors', balance:num(a.balance), balanceKind:'dr'}));
-  state.ledgers.filter(l=>!l.cashInHand).forEach(l=>out.push({key:'led:'+l.id, label:l.name, group:l.group||'asset', balance:num(l.balance), balanceKind:'dr'}));
-  state.creditors.forEach(c=>out.push({key:'cred:'+c.id, label:c.name+' (Creditor)', group:'creditors', balance:num(c.balance), balanceKind:'dr'}));
-  state.suppliers.forEach(s=>out.push({key:'sup:'+s.id, label:s.name+' (Supplier)', group:'suppliers', balance:-num(s.balance), balanceKind:'cr'}));
+  state.accounts.filter(a=>a.kind==='receivable').forEach(a=>out.push({key:'acct:'+a.id, label:a.name, group:'creditors', balance:num(a.balance), balanceKind:'dr', openingDate:a.openingDate||'', openingBalance:a.openingBalance}));
+  state.ledgers.filter(l=>!l.cashInHand).forEach(l=>out.push({key:'led:'+l.id, label:l.name, group:l.group||'asset', balance:num(l.balance), balanceKind:'dr', openingDate:l.openingDate||'', openingBalance:l.openingBalance}));
+  state.creditors.forEach(c=>out.push({key:'cred:'+c.id, label:c.name+' (Creditor)', group:'creditors', balance:num(c.balance), balanceKind:'dr', openingDate:c.openingDate||'', openingBalance:c.openingBalance}));
+  state.suppliers.forEach(s=>out.push({key:'sup:'+s.id, label:s.name+' (Supplier)', group:'suppliers', balance:-num(s.balance), balanceKind:'cr', openingDate:s.openingDate||'', openingBalance:s.openingBalance==null?null:-num(s.openingBalance)}));
   return out;
 }
 // Turns everything recorded in the period into double-entry postings: {key, date, particulars, dr, cr}.
@@ -4038,12 +4064,13 @@ function renderSetupLedgers(body){
         <td>${g.pl? `<span class="pill ${g.pl==='income'?'good':'warning'}">${g.pl==='income'?'Income':'Expense'}</span>` : '<span class="pill neutral">Balance only</span>'}</td>
         <td class="num">${ledgerBalanceLabel(l.balance)}</td>
         <td><span class="pill ${l.active!==false?'good':'neutral'}">${l.active!==false?'Active':'Inactive'}</span></td>
-        <td><button class="btn ghost sm" data-edit="${l.id}">${icon('edit')}</button> ${l.system?'' : `<button class="btn ghost sm" data-toggle="${l.id}" data-cur="${l.active!==false}">${l.active!==false?'Deactivate':'Activate'}</button>${l.active===false?`<button class="btn danger sm" data-delete="${l.id}" style="margin-left:6px;">${icon('trash')}</button>`:''}`}</td>
+        <td><button class="btn ghost sm" data-openbal="${l.id}">Opening</button> <button class="btn ghost sm" data-edit="${l.id}">${icon('edit')}</button> ${l.system?'' : `<button class="btn ghost sm" data-toggle="${l.id}" data-cur="${l.active!==false}">${l.active!==false?'Deactivate':'Activate'}</button>${l.active===false?`<button class="btn danger sm" data-delete="${l.id}" style="margin-left:6px;">${icon('trash')}</button>`:''}`}</td>
       </tr>`; }).join('') : `<tr><td colspan="6" class="empty">No ledgers yet.</td></tr>`}</tbody>
     </table></div></div>
   `;
   const hint = ()=>{ $('#lgHint').textContent = (LEDGER_GROUPS[$('#lgGroup').value]||{}).hint||''; const g = LEDGER_GROUPS[$('#lgGroup').value]; if (g) $('#lgSide').value = g.normal; };
   $('#lgGroup').onchange = hint; hint();
+  $$('[data-openbal]', body).forEach(b=>b.onclick=()=>openOpeningBalanceModal('ledger', b.dataset.openbal));
   $$('[data-edit]', body).forEach(b=>b.onclick=()=>openSetupEditModal('ledgers', b.dataset.edit));
   $('#lgAdd').onclick = async ()=>{
     const name = $('#lgName').value.trim();
@@ -4854,6 +4881,7 @@ function renderSetupCreditors(body){
         <td>
           <button class="btn sm" data-pay="${c.id}">Record payment</button>
           <button class="btn ghost sm" data-history="${c.id}" style="margin-left:6px;">History</button>
+          <button class="btn ghost sm" data-openbal="${c.id}" style="margin-left:6px;">Opening</button>
           <button class="btn ghost sm" data-edit="${c.id}" style="margin-left:6px;">${icon('edit')}</button>
           <button class="btn ghost sm" data-toggle="${c.id}" data-cur="${c.active!==false}" style="margin-left:6px;">${c.active!==false?'Deactivate':'Activate'}</button>
           ${c.active===false?`<button class="btn danger sm" data-delete="${c.id}" style="margin-left:6px;">${icon('trash')}</button>`:''}
@@ -4861,6 +4889,7 @@ function renderSetupCreditors(body){
       </tr>`).join('') : `<tr><td colspan="6" class="empty">No creditors yet.</td></tr>`}</tbody>
     </table></div></div>
   `;
+  $$('[data-openbal]', body).forEach(b=>b.onclick=()=>openOpeningBalanceModal('creditor', b.dataset.openbal));
   $$('[data-edit]', body).forEach(b=>b.onclick=()=>openSetupEditModal('creditors', b.dataset.edit));
   $$('[data-history]', body).forEach(b=>b.onclick=()=>{
     const c = state.creditors.find(x=>x.id===b.dataset.history);
@@ -5036,20 +5065,38 @@ async function accountMovementSince(accountKey, fromDate){
   const r = await computeReport(fromDate, todayStr(), {});
   return buildLedgerPostings(r).filter(p=>p.key===accountKey).reduce((s,p)=>s + p.dr - p.cr, 0);
 }
-function openAccountOpeningModal(account){
+// Every account a statement can be run for — bank, ledger, creditor, supplier — can have its
+// opening balance confirmed against a statement. Balances are held debit-positive internally, but a
+// creditor's dues and a supplier's payable read more naturally as plain amounts, so each kind
+// declares how to convert between the two.
+const OPENING_KINDS = {
+  account:  {collection:'accounts',   list:()=>state.accounts,   key:id=>'acct:'+id, sign:1,  label:'Bank account', hint:'Balance as your bank statement showed it.'},
+  ledger:   {collection:'ledgers',    list:()=>state.ledgers,    key:id=>'led:'+id,  sign:1,  label:'Ledger',       hint:'Debit balances are positive, credit balances negative.', side:true},
+  creditor: {collection:'creditors',  list:()=>state.creditors,  key:id=>'cred:'+id, sign:1,  label:'Creditor',     hint:'What this customer owed the station on that date.'},
+  supplier: {collection:'suppliers',  list:()=>state.suppliers,  key:id=>'sup:'+id,  sign:-1, label:'Supplier',     hint:'What the station owed this supplier on that date.'},
+};
+function openOpeningBalanceModal(kind, id){
+  const cfg = OPENING_KINDS[kind];
   const root = $('#modalRoot');
-  if (!root) return;
-  const defDate = account.openingDate || (monthIdOf(todayStr())+'-01');
+  if (!cfg || !root) return;
+  const rec = cfg.list().find(x=>x.id===id);
+  if (!rec) return;
+  const key = cfg.key(id);
+  const defDate = rec.openingDate || (monthIdOf(todayStr())+'-01');
+  // What the user types is always a plain positive amount; `side` turns it into a debit or credit.
+  const storedOpening = num(rec.openingBalance);
+  const shownOpening = cfg.side ? Math.abs(storedOpening) : storedOpening;
   root.innerHTML = `<div class="modal-backdrop" id="mbDrop">
     <div class="modal">
-      <h3>Opening balance — ${esc(account.name)}</h3>
-      <p style="font-size:13px;color:var(--text-muted);margin:0 0 14px;">Enter the balance as your bank statement showed it on a given date. The current balance is then worked out by adding everything recorded since, so reports open from the right figure.</p>
-      <div class="field"><label>Balance was</label><input type="number" step="0.01" id="obAmount" value="${account.openingBalance!=null?num(account.openingBalance):''}" placeholder="0.00"></div>
+      <h3>Opening balance — ${esc(rec.name)}</h3>
+      <p style="font-size:13px;color:var(--text-muted);margin:0 0 14px;">${esc(cfg.hint)} Everything recorded since is added on, so the balance today stays right and reports open from the figure you confirmed.</p>
+      <div class="field"><label>Balance was</label><input type="number" step="0.01" id="obAmount" value="${shownOpening||''}" placeholder="0.00"></div>
+      ${cfg.side?`<div class="field"><label>Side</label><select id="obSide"><option value="dr" ${storedOpening>=0?'selected':''}>Debit (Dr)</option><option value="cr" ${storedOpening<0?'selected':''}>Credit (Cr)</option></select></div>`:''}
       <div class="field"><label>As at (start of this day)</label><input type="date" id="obDate" value="${defDate}" max="${todayStr()}"></div>
       <div class="card card-pad" style="background:var(--surface-2);margin-bottom:12px;">
         <div class="row" style="justify-content:space-between;font-size:13px;"><span>Recorded since that date</span><strong class="mono" id="obMove">—</strong></div>
         <div class="row" style="justify-content:space-between;font-size:13px;margin-top:4px;"><span>Balance today would become</span><strong class="mono" id="obNew">—</strong></div>
-        <div class="row" style="justify-content:space-between;font-size:12.5px;margin-top:4px;color:var(--text-muted);"><span>Balance today now</span><span class="mono">${money(account.balance)}</span></div>
+        <div class="row" style="justify-content:space-between;font-size:12.5px;margin-top:4px;color:var(--text-muted);"><span>Balance today now</span><span class="mono">${money(rec.balance)}</span></div>
       </div>
       <div id="obMsg" style="font-size:13px;color:var(--critical);"></div>
       <div class="modal-actions">
@@ -5060,36 +5107,50 @@ function openAccountOpeningModal(account){
   </div>`;
   $('#obCancel').onclick = closeModal;
   $('#mbDrop').addEventListener('click', (e)=>{ if (e.target.id==='mbDrop') closeModal(); });
+  // Typed amount -> the debit-positive figure the ledger works in.
+  const typedAsDr = ()=>{
+    const v = num($('#obAmount').value);
+    return (cfg.side && $('#obSide') && $('#obSide').value==='cr') ? -v : v * (cfg.sign<0 ? -1 : 1);
+  };
+  const toStored = (dr)=> cfg.sign<0 ? -dr : dr;   // what goes in the record's own convention
   let movement = 0;
+  const show = ()=>{ $('#obNew').textContent = money(toStored(typedAsDr() + movement)); };
   const recalc = async ()=>{
     const from = $('#obDate').value;
     if (!from) return;
     $('#obMove').textContent = 'calculating…';
-    movement = await accountMovementSince('acct:'+account.id, from);
-    $('#obMove').textContent = money(movement);
-    $('#obNew').textContent = money(num($('#obAmount').value) + movement);
+    movement = await accountMovementSince(key, from);
+    $('#obMove').textContent = money(toStored(movement));
+    show();
   };
   $('#obDate').onchange = recalc;
-  $('#obAmount').oninput = ()=>{ $('#obNew').textContent = money(num($('#obAmount').value) + movement); };
+  $('#obAmount').oninput = show;
+  if ($('#obSide')) $('#obSide').onchange = show;
   recalc();
   $('#obSave').onclick = async ()=>{
     if (!state.dbReady){ $('#obMsg').textContent = "Live data isn't connected."; return; }
     const from = $('#obDate').value;
     if (!from){ $('#obMsg').textContent = 'Pick the date this balance applies to.'; return; }
-    const opening = num($('#obAmount').value);
     $('#obSave').disabled = true;
     try{
-      movement = await accountMovementSince('acct:'+account.id, from);
-      const balance = opening + movement;
-      await state.db.doc('accounts/'+account.id).update({openingBalance:opening, openingDate:from, balance});
-      await logActivity({entity:'Account', entityLabel:account.name, action:'edit',
-        changes:[{field:'Opening balance', from:money(account.openingBalance), to:`${money(opening)} as at ${fmtDateLabel(from)}`},
-                 {field:'Balance today', from:money(account.balance), to:money(balance)}]});
+      movement = await accountMovementSince(key, from);
+      const openingStored = toStored(typedAsDr());
+      const balance = toStored(typedAsDr() + movement);
+      await state.db.doc(cfg.collection+'/'+id).update({openingBalance:openingStored, openingDate:from, balance});
+      await logActivity({entity:cfg.label, entityLabel:rec.name, action:'edit',
+        changes:[{field:'Opening balance', from:money(rec.openingBalance), to:`${money(openingStored)} as at ${fmtDateLabel(from)}`},
+                 {field:'Balance today', from:money(rec.balance), to:money(balance)}]});
       closeModal();
-      renderSetup($('#viewMount'));
-    }catch(e){ $('#obMsg').textContent = 'Could not save: '+(e.message||'error'); $('#obSave').disabled = false; }
+      // The save is already done at this point; a failure to redraw must not read as a failed save.
+      try{ if ($('#viewMount')) renderSetup($('#viewMount')); }catch(e){}
+    }catch(e){
+      const msg = $('#obMsg'), btn = $('#obSave');
+      if (msg) msg.textContent = 'Could not save: '+(e.message||'error');
+      if (btn) btn.disabled = false;
+    }
   };
 }
+function openAccountOpeningModal(account){ openOpeningBalanceModal('account', account.id); }
 function openAccountTxnModal(account, mode){
   const root = $('#modalRoot');
   if (!root) return;
