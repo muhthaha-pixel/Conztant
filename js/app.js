@@ -1148,10 +1148,13 @@ async function lastClosingBefore(nozzleId, date, excludeDutyId){
     const docs = (await getMonthDailyLogs(m)).filter(doc=>doc.date && doc.date <= date)
       .sort((a,b)=>b.date.localeCompare(a.date));
     for (const doc of docs){
-      const candidates = Object.entries(doc.duties||{})
+      // Several duties can share a day, and the order they were typed in says nothing about the
+      // order they ran — a shift entered later can be an earlier one on the meter. A meter only
+      // counts forward, so the last reading of the day is the HIGHEST closing on it.
+      const closings = Object.entries(doc.duties||{})
         .filter(([id,d])=> id!==excludeDutyId && d.nozzles && d.nozzles[nozzleId] && d.nozzles[nozzleId].closing!=null)
-        .sort((a,b)=>String((b[1].savedAt)||'').localeCompare(String((a[1].savedAt)||'')));
-      if (candidates.length){ best = {value:num(candidates[0][1].nozzles[nozzleId].closing), date:doc.date}; break; }
+        .map(([,d])=>num(d.nozzles[nozzleId].closing));
+      if (closings.length){ best = {value:Math.max(...closings), date:doc.date}; break; }
     }
     m = shiftMonth(m, -1);
   }
@@ -1548,7 +1551,14 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
     await state.db.doc('tanks/'+tankId).update({currentStockL: cur - delta});
   }
   for (const [nid, entry] of Object.entries(entries)){
+    // Saving an earlier shift after a later one must not drag the stored reading backwards — only a
+    // genuinely later date, or a higher reading on the same day, moves it on.
+    const nz = state.nozzles.find(x=>x.id===nid);
+    const seenDate = nz ? (nz.lastReadingDate||'') : '';
+    const advances = !nz || !seenDate || date > seenDate || (date === seenDate && num(entry.closing) >= num(nz.lastClosing));
+    if (!advances) continue;
     await state.db.doc('nozzles/'+nid).update({lastClosing: entry.closing, lastReadingDate: date}).catch(()=>{});
+    if (nz){ nz.lastClosing = entry.closing; nz.lastReadingDate = date; }
   }
 
   // Stock transfers: liters dispensed through a nozzle but routed into a different tank instead of
@@ -5480,23 +5490,39 @@ function renderSetupTools(body){
       const soldByTank = {};
       const transferredInByTank = {};
       const logsSnap = await state.db.collection('dailyLogs').limit(1000).get();
+      // The highest closing recorded per nozzle, and the day it belongs to — used to repair a stored
+      // last reading that a shift entered out of order had dragged backwards.
+      const lastByNozzle = {};
       logsSnap.docs.forEach(d=>{
         const data = d.data();
         Object.values(data.duties||{}).forEach(duty=>{
-          Object.values(duty.nozzles||{}).forEach(nz=>{
+          Object.entries(duty.nozzles||{}).forEach(([nid, nz])=>{
             // drawLiters (sale + stock transfer) is what actually left the source tank; older
             // entries saved before stock transfers existed only have `liters`, which meant the same thing.
             const draw = nz.drawLiters!=null ? nz.drawLiters : nz.liters;
             if (nz.tankId) soldByTank[nz.tankId] = (soldByTank[nz.tankId]||0) + num(draw);
             if (nz.transferToTankId) transferredInByTank[nz.transferToTankId] = (transferredInByTank[nz.transferToTankId]||0) + num(nz.transferLiters);
+            if (nz.closing!=null){
+              const date = data.date || d.id;
+              const seen = lastByNozzle[nid];
+              if (!seen || date > seen.date || (date === seen.date && num(nz.closing) > num(seen.value))) lastByNozzle[nid] = {value:num(nz.closing), date};
+            }
           });
         });
       });
+      let nozzlesFixed = 0;
+      for (const [nid, info] of Object.entries(lastByNozzle)){
+        const nz = state.nozzles.find(x=>x.id===nid);
+        if (!nz || (num(nz.lastClosing)===num(info.value) && (nz.lastReadingDate||'')===info.date)) continue;
+        await state.db.doc('nozzles/'+nid).update({lastClosing:info.value, lastReadingDate:info.date}).catch(()=>{});
+        nz.lastClosing = info.value; nz.lastReadingDate = info.date;
+        nozzlesFixed++;
+      }
       for (const t of state.tanks){
         const newStock = num(t.openingStockL) + (receiptsByTank[t.id]||0) + (transferredInByTank[t.id]||0) - (soldByTank[t.id]||0);
         await state.db.doc('tanks/'+t.id).update({currentStockL: newStock});
       }
-      msg.innerHTML = `<span style="color:var(--good)">Done — tank stock recalculated from history (including stock transfers between tanks).</span>`;
+      msg.innerHTML = `<span style="color:var(--good)">Done — tank stock recalculated from history (including stock transfers between tanks).${nozzlesFixed?` &nbsp;${nozzlesFixed} nozzle last-reading(s) corrected.`:''}</span>`;
     }catch(e){ msg.innerHTML = `<span style="color:var(--critical)">${esc(e.message||'Failed')}</span>`; }
   };
 }
