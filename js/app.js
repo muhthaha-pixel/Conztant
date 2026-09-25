@@ -1447,6 +1447,27 @@ function renderDenomGrid(){
   }));
 }
 
+// A Bowser is billed by hand, so the amount entered can differ from what the fuel it took is worth
+// (liters x rate). The creditor is still billed what was entered, but the till is only expected to
+// account for the fuel's value — the difference is a gain or a loss, not missing cash, so it is
+// carried to the P&L. Lines without a rate (or for ordinary creditors) are unaffected.
+function creditSplit(creditSales){
+  let billed = 0, valued = 0, bowserDiff = 0;
+  (creditSales||[]).forEach(c=>{
+    const amount = num(c.amount);
+    billed += amount;
+    const creditor = state.creditors.find(x=>x.id===c.creditorId);
+    const isBowser = creditor && creditor.isBowser;
+    const worth = num(c.liters) * num(c.rate);
+    if (isBowser && num(c.liters) && num(c.rate)){
+      valued += worth;
+      bowserDiff += amount - worth;
+    } else {
+      valued += amount;
+    }
+  });
+  return {billed, valued, bowserDiff};
+}
 function recomputePayments(){
   if (!dutyForm) return;
   const posEl=$('#dfPos'), upiEl=$('#dfUpi'), hpEl=$('#dfHp'), bankEl=$('#dfBank');
@@ -1455,12 +1476,13 @@ function recomputePayments(){
   const hp = hpEl?num(hpEl.value):dutyForm.hpCard||0;
   dutyForm.pos=pos; dutyForm.upi=upi; dutyForm.hpCard=hp;
   if (bankEl) dutyForm.bankAccountId = bankEl.value;
-  const credit = dutyForm.creditSales.reduce((s,c)=>s+num(c.amount),0);
+  const cs = creditSplit(dutyForm.creditSales);
   const expenses = dutyForm.expenses.reduce((s,e)=>s+num(e.amount),0);
   const oils = (dutyForm.oils||[]).reduce((s,o)=>s+num(o.amount),0);
   const total = (dutyForm._amount||0) + oils;
-  const cash = total - pos - upi - hp - credit - expenses;
-  $('#dfCreditTotal') && ($('#dfCreditTotal').value = money(credit));
+  // The till answers for the fuel's value, so a Bowser billed off-rate does not move expected cash.
+  const cash = total - pos - upi - hp - cs.valued - expenses;
+  $('#dfCreditTotal') && ($('#dfCreditTotal').value = money(cs.billed) + (Math.abs(cs.bowserDiff)>=0.005 ? ` (${cs.bowserDiff>0?'+':'−'}${money(Math.abs(cs.bowserDiff))} vs rate → P&L)` : ''));
   $('#dfExpenseTotal') && ($('#dfExpenseTotal').value = money(expenses));
   $('#dfCash') && ($('#dfCash').value = money(cash));
   let counted = 0;
@@ -1546,14 +1568,17 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
     const delta = newDraw - oldDraw;
     if (entry.tankId) stockDeltas[entry.tankId] = (stockDeltas[entry.tankId]||0) + delta;
   }
-  const credit = creditSales.reduce((s,c)=>s+num(c.amount),0);
+  // Creditors are billed what was entered (`billed`); the till only answers for the fuel's value
+  // (`valued`). For a Bowser the two can differ, and that difference is a P&L item.
+  const cs = creditSplit(creditSales);
+  const credit = cs.billed;
   const expenseTotal = (expenses||[]).reduce((s,e)=>s+num(e.amount),0);
   // dutyAmount is the staff member's full takings (fuel + oils) — what the cash split must reconcile
   // to. fuelAmount is kept separately so reports can still show fuel-only figures.
   const fuelAmount = dutyAmount;
   const oilAmount = (oils||[]).reduce((s,o)=>s+num(o.amount),0);
   dutyAmount = fuelAmount + oilAmount;
-  const cash = dutyAmount - (pay.pos||0) - (pay.upi||0) - (pay.hpCard||0) - credit - expenseTotal;
+  const cash = dutyAmount - (pay.pos||0) - (pay.upi||0) - (pay.hpCard||0) - cs.valued - expenseTotal;
   // What the till should hold is `cash`; what was actually counted is the denomination total. When a
   // count has been entered it is the counted figure that goes into Cash in hand, because that is the
   // money the station really has — the shortfall or excess is carried to the P&L instead.
@@ -1563,7 +1588,7 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
   const variance = hasCount ? counted - cash : 0;
   data.duties[id] = {
     staffId, staffName, startTime, endTime, nozzleIds, nozzles: entries, dutyAmount, fuelAmount, oilAmount, dutyLiters,
-    pay: {pos:pay.pos||0, upi:pay.upi||0, hpCard:pay.hpCard||0, bankAccountId:pay.bankAccountId||'', credit, expenses:expenseTotal,
+    pay: {pos:pay.pos||0, upi:pay.upi||0, hpCard:pay.hpCard||0, bankAccountId:pay.bankAccountId||'', credit, creditValued:cs.valued, bowserDiff:cs.bowserDiff, expenses:expenseTotal,
           cash, counted: hasCount ? counted : null, variance, cashPosted},
     creditSales, expenses: expenses||[], oils: oils||[], cashCount, savedAt: new Date().toISOString(),
   };
@@ -2883,7 +2908,7 @@ async function computeReport(from, to, f){
   const r = { from, to, days:daysBetween(from,to), revenue:0, fuelRevenue:0, oilRevenue:0, liters:0,
     byProduct:{p1:{liters:0,amount:0}, p2:{liters:0,amount:0}, p3:{liters:0,amount:0}}, byDay:{},
     payTotals: entryFiltered ? null : {pos:0, upi:0, hpCard:0, credit:0, cash:0, expenses:0},
-    cashVariance:0, duties:[], creditSales:[], oils:[], purchases:[], oilPurchases:[], expenses:[], payments:[], salaryRows:[], salary:0, salaryPaid:0, salaryAdvance:0, journal:[], receipts:[], nozzleRows:[] };
+    cashVariance:0, bowserDiff:0, duties:[], creditSales:[], oils:[], purchases:[], oilPurchases:[], expenses:[], payments:[], salaryRows:[], salary:0, salaryPaid:0, salaryAdvance:0, journal:[], receipts:[], nozzleRows:[] };
   dayDocs.forEach(doc=>{
     Object.entries(doc.duties||{}).forEach(([dutyId,x])=>{
       if (f.staff && x.staffId!==f.staff) return;
@@ -2904,6 +2929,7 @@ async function computeReport(from, to, f){
       });
       if (r.payTotals){ const p = x.pay||{}; r.payTotals.pos += num(p.pos); r.payTotals.upi += num(p.upi); r.payTotals.hpCard += num(p.hpCard); r.payTotals.credit += num(p.credit); r.payTotals.cash += num(p.cash); r.payTotals.expenses += num(p.expenses); }
       r.cashVariance += dutyCashInfo(x).variance;
+      r.bowserDiff += num((x.pay||{}).bowserDiff);
       r.duties.push(Object.assign({date:doc.date, id:dutyId, fuelAmount:dFuel, oilAmount:dOil, liters:dLtr}, {staffName:x.staffName, startTime:x.startTime, endTime:x.endTime, nozzleCount:(x.nozzleIds||[]).length, total:dFuel+dOil, pay:x.pay||{}}));
       if (!entryFiltered){
         (x.creditSales||[]).forEach(c=>{ if (!f.creditor || c.creditorId===f.creditor) r.creditSales.push(Object.assign({date:doc.date, staffName:x.staffName}, c)); });
@@ -2968,10 +2994,13 @@ async function computeReport(from, to, f){
   r.grossMargin = r.revenue + r.closingStock.totalValue - r.openingStock.totalValue - r.purchaseTotal;
   // A till that came up short is a cost; one that came up over is a small gain. Both belong in the
   // P&L, because the cash ledger already holds the counted figure rather than the expected one.
+  // A Bowser billed below the fuel's value is a loss; billed above it, a gain.
+  r.bowserLoss = Math.max(0, -r.bowserDiff);
+  r.bowserGain = Math.max(0, r.bowserDiff);
   r.cashShort = Math.max(0, -r.cashVariance);
   r.cashOver = Math.max(0, r.cashVariance);
-  r.totalExpenses = r.expenseTotal + r.salary + r.otherExpense + r.cashShort;
-  r.net = r.grossMargin + r.otherIncome + r.cashOver - r.totalExpenses;
+  r.totalExpenses = r.expenseTotal + r.salary + r.otherExpense + r.cashShort + r.bowserLoss;
+  r.net = r.grossMargin + r.otherIncome + r.cashOver + r.bowserGain - r.totalExpenses;
   return r;
 }
 
@@ -3415,11 +3444,13 @@ function renderReportBody(body, cfg, r, c){
     Object.entries(byHead).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>plDr.push([`To ${esc(k)}`, v]));
     if (num(r.salary)) plDr.push(['To Salary', r.salary]);
     if (num(r.cashShort)) plDr.push(['To Cash shortage (till count)', r.cashShort]);
+    if (num(r.bowserLoss)) plDr.push(['To Bowser billing difference', r.bowserLoss]);
     Object.entries(r.otherExpenseDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1])
       .forEach(([k,v])=>plDr.push([`To ${esc(k)}`, v]));
     // Nothing at all on the debit side still needs a line, so the account reads sensibly.
     if (!plDr.length) plDr.push(['To Expenses', 0]);
     if (num(r.cashOver)) plCr.push(['By Cash excess (till count)', r.cashOver]);
+    if (num(r.bowserGain)) plCr.push(['By Bowser billing difference', r.bowserGain]);
     const incomeHeads = Object.entries(r.otherIncomeDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]);
     if (incomeHeads.length) incomeHeads.forEach(([k,v])=>plCr.push([`By ${esc(k)}`, v]));
     else plCr.push(['By Other income', r.otherIncome]);
@@ -3787,9 +3818,11 @@ function exportReportExcel(rep){
           Object.entries(byHead).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>dr.push([`To ${k}`, r2(v)]));
           if (num(r.salary)) dr.push(['To Salary', r2(r.salary)]);
           if (num(r.cashShort)) dr.push(['To Cash shortage (till count)', r2(r.cashShort)]);
+          if (num(r.bowserLoss)) dr.push(['To Bowser billing difference', r2(r.bowserLoss)]);
           Object.entries(r.otherExpenseDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>dr.push([`To ${k}`, r2(v)]));
           if (!dr.length) dr.push(['To Expenses', 0]);
           if (num(r.cashOver)) cr.push(['By Cash excess (till count)', r2(r.cashOver)]);
+          if (num(r.bowserGain)) cr.push(['By Bowser billing difference', r2(r.bowserGain)]);
           const incHeads = Object.entries(r.otherIncomeDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]);
           if (incHeads.length) incHeads.forEach(([k,v])=>cr.push([`By ${k}`, r2(v)]));
           else cr.push(['By Other income', r2(r.otherIncome)]);
