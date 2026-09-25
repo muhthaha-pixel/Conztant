@@ -2852,6 +2852,8 @@ const REPORT_TYPES = [
 ];
 function reportSections(cfg){
   const t = REPORT_TYPES.find(x=>x.id===cfg.report) || REPORT_TYPES[0];
+  // Asking for one creditor is really asking for their account, so their statement comes with it.
+  if (cfg.report==='creditors' && cfg.creditor) return t.sections.concat(['ledger']);
   return t.sections;
 }
 const REPORT_CFG_KEY = 'fuelLedgerReportCfg';
@@ -3330,6 +3332,10 @@ async function renderReports(mount){
           ${ledgerGroupKeys().map(g=>`<option value="grp:${g.key}" ${cfg.ledgerPick==='grp:'+g.key?'selected':''}>Group — ${esc(g.label)}</option>`).join('')}
           ${ledgerAccountList().map(a=>`<option value="${esc(a.key)}" ${cfg.ledgerPick===a.key?'selected':''}>${esc(a.label)}</option>`).join('')}
         </select></div>
+        <div class="field" id="rpCreditorWrap" style="grid-column:span 2;display:${cfg.report==='creditors'?'':'none'};"><label>Creditor</label><select id="rpCreditorPick">
+          <option value="">All creditors</option>
+          ${byName(state.creditors).map(c=>`<option value="${c.id}" ${cfg.creditor===c.id?'selected':''}>${esc(c.name)}${c.isBowser?' (Bowser)':''} — ${money(c.balance||0)} due</option>`).join('')}
+        </select></div>
         <div class="field"><label>Period</label><select id="rpPreset">
           ${[['thisMonth','This month'],['lastMonth','Last month'],['last3','Last 3 months'],['thisQuarter','This quarter (FY)'],['fy','This financial year'],['lastFy','Last financial year'],['custom','Custom dates']].map(([v,l])=>`<option value="${v}" ${cfg.preset===v?'selected':''}>${l}</option>`).join('')}
         </select></div>
@@ -3365,11 +3371,19 @@ async function renderReports(mount){
   const syncReport = ()=>{
     cfg.report = $('#rpReport').value;
     $('#rpLedgerWrap').style.display = cfg.report==='ledger' ? '' : 'none';
+    $('#rpCreditorWrap').style.display = cfg.report==='creditors' ? '' : 'none';
     const ids = reportSections(cfg);
     $('#rpIncludes').textContent = 'Includes: ' + ids.map(id=>(REPORT_SECTIONS.find(s=>s.id===id)||{}).label).filter(Boolean).join(' · ');
   };
   $('#rpReport').onchange = ()=>{ syncReport(); };
   $('#rpLedgerPick').onchange = (e)=>{ cfg.ledgerPick = e.target.value; };
+  // The creditor can be chosen from the report's own box or the filter row; keep the two in step.
+  const syncCreditor = (v)=>{
+    cfg.creditor = v;
+    if ($('#rpCreditorPick')) $('#rpCreditorPick').value = v;
+    if ($('#rpCreditor')) $('#rpCreditor').value = v;
+  };
+  $('#rpCreditorPick').onchange = (e)=>syncCreditor(e.target.value);
   syncReport();
   const syncPreset = ()=>{
     const p = $('#rpPreset').value; cfg.preset = p;
@@ -3383,7 +3397,8 @@ async function renderReports(mount){
   $('#rpTo').onchange = (e)=>{ cfg.to = e.target.value; };
   $('#rpCompare').onchange = (e)=>{ cfg.compare = e.target.value; };
   $('#rpBasis').onchange = (e)=>{ cfg.basis = e.target.value; };
-  [['rpStaff','staff'],['rpProduct','product'],['rpNozzle','nozzle'],['rpCreditor','creditor'],['rpMethod','method']].forEach(([id,key])=>{ $('#'+id).onchange = (e)=>{ cfg[key] = e.target.value; }; });
+  [['rpStaff','staff'],['rpProduct','product'],['rpNozzle','nozzle'],['rpMethod','method']].forEach(([id,key])=>{ $('#'+id).onchange = (e)=>{ cfg[key] = e.target.value; }; });
+  $('#rpCreditor').onchange = (e)=>syncCreditor(e.target.value);
 
 
 
@@ -3752,7 +3767,7 @@ function renderReportBody(body, cfg, r, c){
       ['Total','', money(t('opening')), money(Object.values(purchasedBySup).reduce((a,b)=>a+b,0)), money(Object.values(paidBySup).reduce((a,b)=>a+b,0)), money(t('closing'))]));
   }
   if (has('ledger')){
-    const pick = cfg.ledgerPick || 'all';
+    const pick = (cfg.report==='creditors' && cfg.creditor) ? 'cred:'+cfg.creditor : (cfg.ledgerPick || 'all');
     const stmts = ledgerStatements(r, pick);
     const groups = {};
     stmts.forEach(s=>{ (groups[s.group] = groups[s.group]||[]).push(s); });
