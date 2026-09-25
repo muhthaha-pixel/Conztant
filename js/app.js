@@ -2045,10 +2045,7 @@ function renderPurchase(mount){
     if (!s) return;
     state.view = 'expenses'; renderAll();
     // Pre-fill the payment form for this supplier.
-    const k = $('#exKind'); if (!k) return;
-    k.value = 'payment'; k.onchange();
-    if ($('#exParty')) $('#exParty').value = s.name;
-    if ($('#exLedger')) $('#exLedger').value = 'sup:'+s.id;
+    if ($('#exParty')) $('#exParty').value = 'sup:'+s.id;
     if ($('#exAmt')) $('#exAmt').focus();
   });
   loadStockReceiptsList();
@@ -2436,7 +2433,6 @@ async function loadStockReceiptsList(){
 
 /* ============================== PAYMENTS / EXPENSES ============================== */
 const EXPENSE_CATEGORIES = ['Electricity','Maintenance & Repairs','Rent','Statutory / Tax','Bank & Card Charges','Transport','Miscellaneous'];
-const PAYMENT_ITEMS = ['Supplier payment','Staff advance','Staff salary','Loan / EMI repayment','Owner drawings','Statutory / Tax','Bank charges','Deposit / security','Asset purchase','Other payment'];
 // Payments / Expenses share one monthly document (expensesMonthly). An item is either
 //   kind:'expense'  — a running cost by category; counts in the P&L expenses line
 //   kind:'payment'  — money paid to a party (supplier, lender, staff advance, owner…), optionally
@@ -2457,60 +2453,43 @@ async function applyExpenseItem(item, sign){
 function renderExpenses(mount){
   mount.innerHTML = `
     <h1 class="page-title">Payments / Expenses</h1>
-    <p class="page-sub">Money going out — running <strong>expenses</strong> by category (they feed the P&amp;L) or <strong>payments</strong> to a party such as a supplier, lender or staff advance.</p>
+    <p class="page-sub">Money going out. Pick the account it is <strong>paid to</strong> — an expense ledger, a payable, an advance or a supplier — and that account is debited while the cash or bank you paid from is credited.</p>
 
     <div class="card card-pad" style="margin-bottom:16px;">
       <div class="form-grid">
         <div class="field"><label>Date</label><input type="date" id="exDate" value="${todayStr()}" max="${todayStr()}"></div>
-        <div class="field"><label>Type</label><select id="exKind"><option value="expense">Expense (by category)</option><option value="payment">Payment (to a party)</option></select></div>
-        <div class="field" id="exCatWrap"><label>Category</label><select id="exCat">${EXPENSE_CATEGORIES.map(c=>`<option>${c}</option>`).join('')}</select></div>
-        <div class="field" id="exPartyWrap" style="display:none;"><label>Paid to (party)</label><input type="text" id="exParty" list="exPartyList" placeholder="e.g. HPCL / Ravi (advance) / Bank loan">
-          <datalist id="exPartyList">${state.suppliers.filter(s=>s.active!==false).map(s=>`<option value="${esc(s.name)}">`).join('')}${state.staff.filter(s=>s.active!==false).map(s=>`<option value="${esc(s.name)}">`).join('')}</datalist></div>
-        <div class="field" id="exItemWrap" style="display:none;"><label>Payment for</label><select id="exItem">${PAYMENT_ITEMS.map(p=>`<option>${p}</option>`).join('')}</select></div>
-        <div class="field" id="exLedgerWrap" style="display:none;"><label>Settle / debit to</label><select id="exLedger">${payLedgerOptions('')}</select></div>
+        <div class="field" style="grid-column:span 2;"><label>Paid to</label><select id="exParty">${payToOptions('')}</select></div>
         <div class="field" style="grid-column:span 2;"><label>Description</label><input type="text" id="exDesc" placeholder="e.g. July electricity bill / Invoice DO-4521"></div>
         <div class="field"><label>Amount (₹)</label><input type="number" step="0.01" id="exAmt" placeholder="0.00"></div>
         <div class="field"><label>Mode</label><select id="exMode">${RECEIPT_MODES.map(m=>`<option>${m}</option>`).join('')}</select></div>
         <div class="field"><label>Paid from</label><select id="exFrom"><option value="">Not tracked</option>${receiptIntoOptions('cash')}</select></div>
-        <div class="field"><button class="btn primary" id="exSave" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} <span id="exSaveLbl">Add expense</span></button></div>
+        <div class="field"><button class="btn primary" id="exSave" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} <span id="exSaveLbl">Add payment</span></button></div>
       </div>
-      <div class="hint" style="color:var(--text-faint);font-size:12px;">"Paid from" reduces that cash / bank balance. For a payment, pick a <strong>Liability / Payable</strong> ledger to settle a due, an <strong>Asset</strong> ledger for an advance or deposit, or an <strong>Expense</strong> ledger if it should hit the P&amp;L.</div>
+      <div class="hint" style="color:var(--text-faint);font-size:12px;">"Paid from" reduces that cash / bank balance. Under "Paid to", an <strong>Expense</strong> ledger hits the P&amp;L, a <strong>Liability / Payable</strong> ledger settles a due, an <strong>Asset</strong> ledger records an advance or deposit, and a <strong>Supplier</strong> clears what is owed to them.</div>
       <div id="exMsg" style="font-size:13px;margin-top:4px;"></div>
     </div>
 
     <div class="section-head"><h2>This period</h2><span id="exMonthLabel"></span></div>
     <div id="exList"></div>
   `;
-  const syncKind = ()=>{
-    const pay = $('#exKind').value==='payment';
-    $('#exCatWrap').style.display = pay ? 'none' : '';
-    $('#exPartyWrap').style.display = pay ? '' : 'none';
-    $('#exLedgerWrap').style.display = pay ? '' : 'none';
-    $('#exItemWrap').style.display = pay ? '' : 'none';
-    $('#exSaveLbl').textContent = pay ? 'Add payment' : 'Add expense';
-    $('#exMode').value = pay ? 'Bank transfer' : 'Cash';
-    $('#exFrom').value = pay ? ($('#exFrom').querySelector('option[value^="acct:"]') ? $('#exFrom').querySelector('option[value^="acct:"]').value : 'cash') : 'cash';
-  };
-  $('#exKind').onchange = syncKind; syncKind();
   $('#exSave').onclick = addExpense;
   loadExpensesList();
 }
 
+// Every entry is a payment posted against the account it was paid to; that account carries the
+// classification the old category field used to, so an expense ledger still reaches the P&L.
 async function addExpense(){
   const msg = $('#exMsg');
-  const kind = $('#exKind').value;
+  const ledger = $('#exParty').value;
   const item = {
-    id:uid(), date:$('#exDate').value, kind,
-    category: kind==='expense' ? $('#exCat').value : '',
-    party: kind==='payment' ? $('#exParty').value.trim() : '',
-    item: kind==='payment' ? $('#exItem').value : '',
-    ledger: kind==='payment' ? $('#exLedger').value : '',
+    id:uid(), date:$('#exDate').value, kind:'payment',
+    category:'', party: targetLabel(ledger) || '', item:'', ledger,
     description:$('#exDesc').value.trim(), amount:num($('#exAmt').value),
     mode:$('#exMode').value, paidFrom:$('#exFrom').value,
     by: state.currentUser?state.currentUser.name:'', savedAt:new Date().toISOString(),
   };
   if (!state.dbReady){ msg.innerHTML = `<span style="color:var(--critical)">Live data isn't connected.</span>`; return; }
-  if (kind==='payment' && !item.party){ msg.innerHTML = `<span style="color:var(--critical)">Enter who the payment was made to.</span>`; return; }
+  if (!ledger){ msg.innerHTML = `<span style="color:var(--critical)">Choose the account this was paid to.</span>`; return; }
   if (!(item.amount>0)){ msg.innerHTML = `<span style="color:var(--critical)">Enter an amount.</span>`; return; }
   $('#exSave').disabled = true;
   try{
@@ -2520,9 +2499,9 @@ async function addExpense(){
     data.total = data.items.reduce((s,i)=>s+num(i.amount),0);
     await setMonthDoc('expensesMonthly', monthId, data);
     await applyExpenseItem(item, +1);
-    await logActivity({entity: kind==='payment'?'Payment':'Expense', entityLabel:(kind==='payment'?item.party:item.category)+(item.description?' · '+item.description:''), action:'add', summary:`Added ${money(item.amount)} by ${item.mode}${item.paidFrom?' from '+paidFromLabel(item.paidFrom):''}`});
-    msg.innerHTML = `<span style="color:var(--good)">${kind==='payment'?'Payment':'Expense'} added.</span>`;
-    $('#exDesc').value=''; $('#exAmt').value=''; if ($('#exParty')) $('#exParty').value='';
+    await logActivity({entity:'Payment', entityLabel:item.party+(item.description?' · '+item.description:''), action:'add', summary:`Added ${money(item.amount)} by ${item.mode}${item.paidFrom?' from '+paidFromLabel(item.paidFrom):''}`});
+    msg.innerHTML = `<span style="color:var(--good)">Payment added — ${esc(item.party)} debited ${money(item.amount)}.</span>`;
+    $('#exDesc').value=''; $('#exAmt').value=''; $('#exParty').value='';
     loadExpensesList();
   }catch(e){ msg.innerHTML = `<span style="color:var(--critical)">Couldn't save: ${esc(e.message||'error')}</span>`; }
   finally{ $('#exSave').disabled=false; }
@@ -2548,7 +2527,7 @@ function expenseEditFields(item){
   return [
     {key:'date', label:'Date', type:'date'},
     ...(expenseKind(item)==='payment'
-      ? [{key:'party', label:'Paid to (party)', type:'text'}, {key:'item', label:'Payment for', type:'select', options:PAYMENT_ITEMS.map(p=>({value:p,label:p}))}, {key:'ledger', label:'Settle / debit to', type:'select', options:payLedgerList(), fmt:v=>targetLabel(v)||'—'}]
+      ? [{key:'ledger', label:'Paid to', type:'select', options:payToList(), fmt:v=>targetLabel(v)||'—'}]
       : [{key:'category', label:'Category', type:'select', options:EXPENSE_CATEGORIES.map(c=>({value:c,label:c}))}]),
     {key:'description', label:'Description', type:'text'},
     {key:'amount', label:'Amount (₹)', type:'number', fmt:v=>money(v)},
@@ -2563,9 +2542,11 @@ function editExpense(monthId, item){
     onSave: async (out)=>{
       if (!state.dbReady) throw new Error("Live data isn't connected.");
       if (!(num(out.amount)>0)) throw new Error('Enter an amount.');
-      if (expenseKind(item)==='payment' && !out.party) throw new Error('Enter the party.');
+      if (expenseKind(item)==='payment' && !out.ledger) throw new Error('Choose the account this was paid to.');
       const changes = diffFields(fields, item, out);
       const newItem = Object.assign({}, item, out, {id:item.id});
+      // The party is just the readable name of the account, kept in step so lists and exports read right.
+      if (expenseKind(newItem)==='payment') newItem.party = targetLabel(newItem.ledger) || newItem.party || '';
       const newMonth = monthIdOf(out.date);
       await applyExpenseItem(item, -1);
       const oldData = await getMonthDoc('expensesMonthly', monthId);
@@ -2595,7 +2576,7 @@ async function loadExpensesList(){
     <tbody>${items.length? items.map(it=>`<tr>
       <td style="white-space:nowrap;">${fmtDateLabel(it.date)}</td>
       <td><span class="pill ${expenseKind(it)==='payment'?'neutral':'warning'}">${expenseKind(it)==='payment'?'Payment':'Expense'}</span></td>
-      <td>${esc(expenseKind(it)==='payment' ? (it.party||'—') : (it.category||'—'))}${it.item?`<div class="hint" style="font-size:11px;color:var(--text-faint)">${esc(it.item)}</div>`:''}${it.ledger?`<div class="hint" style="font-size:11px;color:var(--text-faint)">→ ${esc(targetLabel(it.ledger)||'')}</div>`:''}</td>
+      <td>${esc(expenseKind(it)==='payment' ? (it.party||'—') : (it.category||'—'))}${it.item?`<div class="hint" style="font-size:11px;color:var(--text-faint)">${esc(it.item)}</div>`:''}${it.ledger && targetLabel(it.ledger)!==it.party?`<div class="hint" style="font-size:11px;color:var(--text-faint)">→ ${esc(targetLabel(it.ledger)||'')}</div>`:''}</td>
       <td>${esc(it.description||'—')}${it.source==='duty'?`<div class="hint" style="font-size:11px;color:var(--text-faint)">from a duty entry (paid from till)</div>`:''}</td>
       <td>${esc(it.mode||(it.source==='duty'?'Cash':'—'))}</td>
       <td>${esc(it.source==='duty' ? 'Duty till' : paidFromLabel(it.paidFrom))}</td>
@@ -4408,6 +4389,31 @@ function receiptLedgerOptions(sel){
 // Payments can also settle a supplier's outstanding bill, so their options include suppliers.
 function payLedgerOptions(sel){
   return receiptLedgerOptions(sel) + state.suppliers.filter(s=>s.active!==false).map(s=>`<option value="sup:${s.id}" ${('sup:'+s.id)===sel?'selected':''}>${esc(s.name)} (Supplier — ${money(s.balance||0)} due)</option>`).join('');
+}
+// "Paid to" on the Payments screen is one list of every account a payment can land on: each
+// ledger under its own group heading, plus suppliers, so settling a bill needs no second field.
+// Expense ledgers lead because that is what most payments are.
+const PAY_TO_ORDER = ['expense','liability','asset','capital','income'];
+function payToGroups(){
+  const groups = PAY_TO_ORDER.map(k=>({
+    label: (LEDGER_GROUPS[k]||{}).label || k,
+    items: state.ledgers.filter(l=>l.active!==false && !l.cashInHand && (l.group||'asset')===k)
+      .sort((a,b)=>(a.name||'').localeCompare(b.name||''))
+      .map(l=>({value:'led:'+l.id, label:l.name})),
+  }));
+  groups.push({label:'Suppliers', items: state.suppliers.filter(s=>s.active!==false)
+    .sort((a,b)=>(a.name||'').localeCompare(b.name||''))
+    .map(s=>({value:'sup:'+s.id, label:s.name+' — '+money(s.balance||0)+' due'}))});
+  return groups.filter(g=>g.items.length);
+}
+function payToOptions(sel){
+  return `<option value="">Select account…</option>` + payToGroups().map(g=>
+    `<optgroup label="${esc(g.label)}">${g.items.map(o=>`<option value="${o.value}" ${o.value===sel?'selected':''}>${esc(o.label)}</option>`).join('')}</optgroup>`).join('');
+}
+function payToList(){
+  const out = [{value:'', label:'— none —'}];
+  payToGroups().forEach(g=>g.items.forEach(o=>out.push({value:o.value, label:g.label+' · '+o.label})));
+  return out;
 }
 function payLedgerList(){
   return [{value:'',label:'— none —'}]
