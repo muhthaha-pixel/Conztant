@@ -5316,13 +5316,20 @@ async function accountMovementSince(accountKey, fromDate){
   const r = await computeReport(fromDate, todayStr(), {});
   return buildLedgerPostings(r).filter(p=>p.key===accountKey).reduce((s,p)=>s + p.dr - p.cr, 0);
 }
+// The key a ledger's postings are filed under. Cash in hand is addressed as 'cash' everywhere.
+function ledgerPostingKey(id){
+  const l = state.ledgers.find(x=>x.id===id);
+  return (l && l.cashInHand) ? 'cash' : 'led:'+id;
+}
 // Every account a statement can be run for — bank, ledger, creditor, supplier — can have its
 // opening balance confirmed against a statement. Balances are held debit-positive internally, but a
 // creditor's dues and a supplier's payable read more naturally as plain amounts, so each kind
 // declares how to convert between the two.
 const OPENING_KINDS = {
   account:  {collection:'accounts',   list:()=>state.accounts,   key:id=>'acct:'+id, sign:1,  label:'Bank account', hint:'Balance as your bank statement showed it.'},
-  ledger:   {collection:'ledgers',    list:()=>state.ledgers,    key:id=>'led:'+id,  sign:1,  label:'Ledger',       hint:'Debit balances are positive, credit balances negative.', side:true},
+  // Cash in hand posts under the bare key 'cash', never 'led:<id>' — looking its movement
+  // up by the ledger id finds nothing, which would reset the balance to the bare opening figure.
+  ledger:   {collection:'ledgers',    list:()=>state.ledgers,    key:ledgerPostingKey, sign:1,  label:'Ledger',       hint:'Debit balances are positive, credit balances negative.', side:true},
   creditor: {collection:'creditors',  list:()=>state.creditors,  key:id=>'cred:'+id, sign:1,  label:'Creditor',     hint:'What this customer owed the station on that date.'},
   supplier: {collection:'suppliers',  list:()=>state.suppliers,  key:id=>'sup:'+id,  sign:-1, label:'Supplier',     hint:'What the station owed this supplier on that date.'},
 };
@@ -5678,6 +5685,10 @@ function renderSetupTools(body){
       const months = [];
       let cursor = monthIdOf(todayStr());
       for (let i=0;i<36;i++){ months.push(cursor); cursor = shiftMonth(cursor,-1); }
+      // Only what happened on or after the confirmed opening date counts, or history from before it
+      // would be added on top of an opening balance that already includes it.
+      const since = cashLedger.openingDate || '';
+      const counts = (d)=> !since || (d||'') >= since;
       let dutyCash=0, receiptCash=0, journalCash=0, paidCash=0;
       const logsSnap = await state.db.collection('dailyLogs').limit(1000).get();
       // Duties saved before counted cash was posted are brought into line here: the counted figure
@@ -5689,7 +5700,7 @@ function renderSetupTools(body){
         let changed = false;
         Object.values(data.duties||{}).forEach(x=>{
           const ci = dutyCashInfo(x);
-          dutyCash += ci.posted;
+          if (counts(doc.id)) dutyCash += ci.posted;
           if (x.pay && x.pay.cashPosted==null && ci.hasCount){
             x.pay.counted = ci.counted; x.pay.variance = ci.variance; x.pay.cashPosted = ci.posted;
             changed = true; migrated++;
@@ -5703,11 +5714,11 @@ function renderSetupTools(body){
       }
       for (const m of months){
         const r = await state.db.doc('receiptsMonthly/'+m).get();
-        if (r.exists) (r.data().items||[]).forEach(it=>{ if ((it.into||'cash')==='cash') receiptCash += num(it.amount); });
+        if (r.exists) (r.data().items||[]).forEach(it=>{ if ((it.into||'cash')==='cash' && counts(it.date)) receiptCash += num(it.amount); });
         const ex = await state.db.doc('expensesMonthly/'+m).get();
-        if (ex.exists) (ex.data().items||[]).forEach(it=>{ if (it.paidFrom==='cash') paidCash += num(it.amount); });
+        if (ex.exists) (ex.data().items||[]).forEach(it=>{ if (it.paidFrom==='cash' && counts(it.date)) paidCash += num(it.amount); });
         const j = await state.db.doc('journalMonthly/'+m).get();
-        if (j.exists) (j.data().items||[]).forEach(it=>{ if (it.debit==='cash') journalCash += num(it.amount); if (it.credit==='cash') journalCash -= num(it.amount); });
+        if (j.exists) (j.data().items||[]).forEach(it=>{ if (!counts(it.date)) return; if (it.debit==='cash') journalCash += num(it.amount); if (it.credit==='cash') journalCash -= num(it.amount); });
       }
       const balance = num(cashLedger.openingBalance) + dutyCash + receiptCash - paidCash + journalCash;
       await state.db.doc('ledgers/'+cashLedger.id).update({balance});
