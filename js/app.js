@@ -1395,15 +1395,34 @@ function dutyPayLabel(key, fallback){
             : kind==='sup' ? state.suppliers.find(x=>x.id===id) : null;
   return (rec && rec.name) || targetLabel(key) || fallback || key;
 }
-// A ledger can name what it is paid *for*: one marked as linking to staff asks which employee, and
-// the amount is booked against that person's salary for the month as an advance. Ledgers created
-// before this existed are matched on their name, so "Salary" or "Staff advance" work straight away.
+// A ledger can name what it is paid *for*, and picking it then asks which one. A staff link is more
+// than a label: the amount is booked against that person's salary for the month as an advance.
+// Ledgers created before this existed are matched on their name, so "Salary" or "Staff advance"
+// work straight away.
+const SUBJECT_KINDS = {
+  staff:    {label:'For (staff member)', list:()=>state.staff,     placeholder:'Select staff…',    empty:'Add staff under Setup'},
+  creditor: {label:'For (creditor)',     list:()=>state.creditors, placeholder:'Select creditor…', empty:'Add a creditor first'},
+  supplier: {label:'For (supplier)',     list:()=>state.suppliers, placeholder:'Select supplier…', empty:'Add a supplier first'},
+};
 function ledgerSubjectType(key){
   if (!key || !key.startsWith('led:')) return '';
   const l = state.ledgers.find(x=>x.id===key.slice(4));
   if (!l) return '';
-  if (l.linkTo) return l.linkTo;
+  if (l.linkTo) return SUBJECT_KINDS[l.linkTo] ? l.linkTo : '';
   return /salary|advance|wage/i.test(l.name||'') ? 'staff' : '';
+}
+function subjectRecords(type){
+  const k = SUBJECT_KINDS[type];
+  return k ? k.list().filter(x=>x.active!==false).slice().sort((a,b)=>(a.name||'').localeCompare(b.name||'')) : [];
+}
+function subjectNameOf(type, id){ return ((subjectRecords(type).find(x=>x.id===id))||{}).name || ''; }
+function subjectOptionsHtml(type, sel){
+  const k = SUBJECT_KINDS[type]; if (!k) return '';
+  return `<option value="">${esc(k.placeholder)}</option>` +
+    subjectRecords(type).map(x=>`<option value="${x.id}" ${x.id===sel?'selected':''}>${esc(x.name)}</option>`).join('');
+}
+function subjectPickList(type){
+  return [{value:'', label:'— none —'}].concat(subjectRecords(type).map(x=>({value:x.id, label:x.name})));
 }
 function renderDutyExpenseRows(){
   const el = $('#dfExpenseRows'); if(!el) return;
@@ -2459,37 +2478,74 @@ function renderExpenses(mount){
       <div class="form-grid">
         <div class="field"><label>Date</label><input type="date" id="exDate" value="${todayStr()}" max="${todayStr()}"></div>
         <div class="field" style="grid-column:span 2;"><label>Paid to</label><select id="exParty">${payToOptions('')}</select></div>
+        <div class="field" id="exSubjectWrap" style="display:none;"><label id="exSubjectLbl">For</label><select id="exSubject"></select></div>
         <div class="field" style="grid-column:span 2;"><label>Description</label><input type="text" id="exDesc" placeholder="e.g. July electricity bill / Invoice DO-4521"></div>
         <div class="field"><label>Amount (₹)</label><input type="number" step="0.01" id="exAmt" placeholder="0.00"></div>
         <div class="field"><label>Mode</label><select id="exMode">${RECEIPT_MODES.map(m=>`<option>${m}</option>`).join('')}</select></div>
         <div class="field"><label>Paid from</label><select id="exFrom"><option value="">Not tracked</option>${receiptIntoOptions('cash')}</select></div>
         <div class="field"><button class="btn primary" id="exSave" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} <span id="exSaveLbl">Add payment</span></button></div>
       </div>
-      <div class="hint" style="color:var(--text-faint);font-size:12px;">"Paid from" reduces that cash / bank balance. Under "Paid to", an <strong>Expense</strong> ledger hits the P&amp;L, a <strong>Liability / Payable</strong> ledger settles a due, an <strong>Asset</strong> ledger records an advance or deposit, and a <strong>Supplier</strong> clears what is owed to them.</div>
+      <div class="hint" style="color:var(--text-faint);font-size:12px;">"Paid from" reduces that cash / bank balance. Under "Paid to", an <strong>Expense</strong> ledger hits the P&amp;L, a <strong>Liability / Payable</strong> ledger settles a due, an <strong>Asset</strong> ledger records an advance or deposit, and a <strong>Supplier</strong> or <strong>Creditor</strong> clears what is owed. A ledger that links to a person — salary or an advance — then asks who it is for, and the amount goes onto that month's salary sheet as an advance.</div>
       <div id="exMsg" style="font-size:13px;margin-top:4px;"></div>
     </div>
 
     <div class="section-head"><h2>This period</h2><span id="exMonthLabel"></span></div>
     <div id="exList"></div>
   `;
+  // A ledger that links to staff, a creditor or a supplier asks which one as soon as it is picked.
+  const syncPayTo = ()=>{
+    const type = ledgerSubjectType($('#exParty').value);
+    const wrap = $('#exSubjectWrap'), sel = $('#exSubject');
+    sel.dataset.type = type || '';
+    if (!type){ wrap.style.display = 'none'; sel.innerHTML = ''; return; }
+    wrap.style.display = '';
+    $('#exSubjectLbl').textContent = SUBJECT_KINDS[type].label;
+    const opts = subjectOptionsHtml(type, '');
+    sel.innerHTML = subjectRecords(type).length ? opts : `<option value="">${esc(SUBJECT_KINDS[type].empty)}</option>`;
+  };
+  $('#exParty').onchange = syncPayTo; syncPayTo();
   $('#exSave').onclick = addExpense;
   loadExpensesList();
 }
+
+// A payment made for a staff member is an advance against their pay: it lands on that month's
+// salary sheet so their net drops by what they have already been handed. Only the change is applied,
+// and the row is created if the sheet doesn't have that person yet.
+async function bookSalaryAdvance(staffId, delta, date){
+  if (!staffId || !delta || !date) return;
+  const salMonth = monthIdOf(date);
+  const salData = (await getMonthDoc('salaryMonthly', salMonth)) || {staff:{}};
+  salData.staff = salData.staff || {};
+  if (!salData.staff[staffId]){
+    const person = state.staff.find(s=>s.id===staffId);
+    salData.staff[staffId] = {name: person?person.name:'', wageType: person && num(person.hourlyWage)>0 ? 'hourly':'monthly', hoursWorked:null,
+                              baseSalary: person ? num(person.monthlySalary) : 0, advance:0, deduction:0, netPaid:0, status:'pending', paidDate:null};
+  }
+  salData.staff[staffId].advance = num(salData.staff[staffId].advance) + delta;
+  recomputeSalaryTotals(salData);
+  await setMonthDoc('salaryMonthly', salMonth, salData);
+}
+// What a payment line puts on the salary sheet — nothing unless it names a staff member.
+function expenseAdvance(it){ return (it && it.subjectType==='staff' && it.subjectId) ? num(it.amount) : 0; }
 
 // Every entry is a payment posted against the account it was paid to; that account carries the
 // classification the old category field used to, so an expense ledger still reaches the P&L.
 async function addExpense(){
   const msg = $('#exMsg');
   const ledger = $('#exParty').value;
+  const subjectType = ledgerSubjectType(ledger);
+  const subjectId = subjectType ? ($('#exSubject').value || '') : '';
   const item = {
     id:uid(), date:$('#exDate').value, kind:'payment',
     category:'', party: targetLabel(ledger) || '', item:'', ledger,
+    subjectType: subjectType||'', subjectId, subjectName: subjectNameOf(subjectType, subjectId),
     description:$('#exDesc').value.trim(), amount:num($('#exAmt').value),
     mode:$('#exMode').value, paidFrom:$('#exFrom').value,
     by: state.currentUser?state.currentUser.name:'', savedAt:new Date().toISOString(),
   };
   if (!state.dbReady){ msg.innerHTML = `<span style="color:var(--critical)">Live data isn't connected.</span>`; return; }
   if (!ledger){ msg.innerHTML = `<span style="color:var(--critical)">Choose the account this was paid to.</span>`; return; }
+  if (subjectType && !subjectId){ msg.innerHTML = `<span style="color:var(--critical)">Choose who this payment is for.</span>`; return; }
   if (!(item.amount>0)){ msg.innerHTML = `<span style="color:var(--critical)">Enter an amount.</span>`; return; }
   $('#exSave').disabled = true;
   try{
@@ -2499,9 +2555,11 @@ async function addExpense(){
     data.total = data.items.reduce((s,i)=>s+num(i.amount),0);
     await setMonthDoc('expensesMonthly', monthId, data);
     await applyExpenseItem(item, +1);
-    await logActivity({entity:'Payment', entityLabel:item.party+(item.description?' · '+item.description:''), action:'add', summary:`Added ${money(item.amount)} by ${item.mode}${item.paidFrom?' from '+paidFromLabel(item.paidFrom):''}`});
-    msg.innerHTML = `<span style="color:var(--good)">Payment added — ${esc(item.party)} debited ${money(item.amount)}.</span>`;
+    await bookSalaryAdvance(item.subjectId, expenseAdvance(item), item.date);
+    await logActivity({entity:'Payment', entityLabel:[item.party, item.subjectName].filter(Boolean).join(' · ')+(item.description?' · '+item.description:''), action:'add', summary:`Added ${money(item.amount)} by ${item.mode}${item.paidFrom?' from '+paidFromLabel(item.paidFrom):''}`});
+    msg.innerHTML = `<span style="color:var(--good)">Payment added — ${esc(item.party)} debited ${money(item.amount)}.${expenseAdvance(item)?` Booked to ${esc(item.subjectName)}'s salary for ${monthLabel(monthIdOf(item.date))} as an advance.`:''}</span>`;
     $('#exDesc').value=''; $('#exAmt').value=''; $('#exParty').value='';
+    $('#exParty').onchange();
     loadExpensesList();
   }catch(e){ msg.innerHTML = `<span style="color:var(--critical)">Couldn't save: ${esc(e.message||'error')}</span>`; }
   finally{ $('#exSave').disabled=false; }
@@ -2518,6 +2576,7 @@ async function removeExpense(monthId, itemId){
   data.total = data.items.reduce((s,i)=>s+num(i.amount),0);
   await setMonthDoc('expensesMonthly', monthId, data);
   await applyExpenseItem(item, -1);
+  await bookSalaryAdvance(item.subjectId, -expenseAdvance(item), item.date);
   await logActivity({entity: expenseKind(item)==='payment'?'Payment':'Expense', entityLabel:(item.party||item.category||'')+(item.description?' · '+item.description:''), action:'delete', summary:`Removed ${money(item.amount)}`});
   loadExpensesList();
 }
@@ -2528,6 +2587,9 @@ function expenseEditFields(item){
     {key:'date', label:'Date', type:'date'},
     ...(expenseKind(item)==='payment'
       ? [{key:'ledger', label:'Paid to', type:'select', options:payToList(), fmt:v=>targetLabel(v)||'—'}]
+          .concat(ledgerSubjectType(item.ledger)
+            ? [{key:'subjectId', label:SUBJECT_KINDS[ledgerSubjectType(item.ledger)].label, type:'select',
+                options:subjectPickList(ledgerSubjectType(item.ledger)), fmt:v=>subjectNameOf(ledgerSubjectType(item.ledger), v)||'—'}] : [])
       : [{key:'category', label:'Category', type:'select', options:EXPENSE_CATEGORIES.map(c=>({value:c,label:c}))}]),
     {key:'description', label:'Description', type:'text'},
     {key:'amount', label:'Amount (₹)', type:'number', fmt:v=>money(v)},
@@ -2546,9 +2608,17 @@ function editExpense(monthId, item){
       const changes = diffFields(fields, item, out);
       const newItem = Object.assign({}, item, out, {id:item.id});
       // The party is just the readable name of the account, kept in step so lists and exports read right.
-      if (expenseKind(newItem)==='payment') newItem.party = targetLabel(newItem.ledger) || newItem.party || '';
+      if (expenseKind(newItem)==='payment'){
+        newItem.party = targetLabel(newItem.ledger) || newItem.party || '';
+        // Moving the payment to an account that asks for a different sub-item drops the old one.
+        const st = ledgerSubjectType(newItem.ledger);
+        newItem.subjectType = st;
+        newItem.subjectId = st ? (newItem.subjectId||'') : '';
+        newItem.subjectName = st ? subjectNameOf(st, newItem.subjectId) : '';
+      }
       const newMonth = monthIdOf(out.date);
       await applyExpenseItem(item, -1);
+      await bookSalaryAdvance(item.subjectId, -expenseAdvance(item), item.date);
       const oldData = await getMonthDoc('expensesMonthly', monthId);
       if (oldData){ oldData.items = (oldData.items||[]).filter(i=>i.id!==item.id); oldData.total = oldData.items.reduce((s,i)=>s+num(i.amount),0); await setMonthDoc('expensesMonthly', monthId, oldData); }
       const newData = (newMonth===monthId && oldData) ? oldData : ((await getMonthDoc('expensesMonthly', newMonth)) || {items:[], total:0});
@@ -2556,6 +2626,7 @@ function editExpense(monthId, item){
       newData.total = newData.items.reduce((s,i)=>s+num(i.amount),0);
       await setMonthDoc('expensesMonthly', newMonth, newData);
       await applyExpenseItem(newItem, +1);
+      await bookSalaryAdvance(newItem.subjectId, expenseAdvance(newItem), newItem.date);
       if (changes.length) await logActivity({entity: expenseKind(item)==='payment'?'Payment':'Expense', entityLabel:(newItem.party||newItem.category||'')+(newItem.description?' · '+newItem.description:''), action:'edit', changes});
       loadExpensesList();
     }
@@ -2576,7 +2647,7 @@ async function loadExpensesList(){
     <tbody>${items.length? items.map(it=>`<tr>
       <td style="white-space:nowrap;">${fmtDateLabel(it.date)}</td>
       <td><span class="pill ${expenseKind(it)==='payment'?'neutral':'warning'}">${expenseKind(it)==='payment'?'Payment':'Expense'}</span></td>
-      <td>${esc(expenseKind(it)==='payment' ? (it.party||'—') : (it.category||'—'))}${it.item?`<div class="hint" style="font-size:11px;color:var(--text-faint)">${esc(it.item)}</div>`:''}${it.ledger && targetLabel(it.ledger)!==it.party?`<div class="hint" style="font-size:11px;color:var(--text-faint)">→ ${esc(targetLabel(it.ledger)||'')}</div>`:''}</td>
+      <td>${esc(expenseKind(it)==='payment' ? (it.party||'—') : (it.category||'—'))}${it.subjectName?`<div class="hint" style="font-size:11px;color:var(--text-faint)">for ${esc(it.subjectName)}${it.subjectType==='staff'?' (salary advance)':''}</div>`:''}${it.item?`<div class="hint" style="font-size:11px;color:var(--text-faint)">${esc(it.item)}</div>`:''}${it.ledger && targetLabel(it.ledger)!==it.party?`<div class="hint" style="font-size:11px;color:var(--text-faint)">→ ${esc(targetLabel(it.ledger)||'')}</div>`:''}</td>
       <td>${esc(it.description||'—')}${it.source==='duty'?`<div class="hint" style="font-size:11px;color:var(--text-faint)">from a duty entry (paid from till)</div>`:''}</td>
       <td>${esc(it.mode||(it.source==='duty'?'Cash':'—'))}</td>
       <td>${esc(it.source==='duty' ? 'Duty till' : paidFromLabel(it.paidFrom))}</td>
@@ -4188,7 +4259,7 @@ function renderSetupLedgers(body){
       <div class="form-grid">
         <div class="field"><label>Ledger name</label><input type="text" id="lgName" placeholder="e.g. Discount allowed"></div>
         <div class="field"><label>Group</label><select id="lgGroup">${Object.entries(LEDGER_GROUPS).map(([k,g])=>`<option value="${k}">${esc(g.label)}</option>`).join('')}</select></div>
-        <div class="field"><label>Links to</label><select id="lgLink"><option value="">Nothing — plain ledger</option><option value="staff">A staff member (salary / advance)</option></select></div>
+        <div class="field"><label>Links to</label><select id="lgLink"><option value="">Nothing — plain ledger</option><option value="staff">A staff member (salary / advance)</option><option value="creditor">A creditor</option><option value="supplier">A supplier</option></select></div>
         <div class="field"><label>Opening balance (₹)</label><input type="number" step="0.01" id="lgOpen" placeholder="0.00"></div>
         <div class="field"><label>Opening side</label><select id="lgSide"><option value="dr">Debit (Dr)</option><option value="cr">Credit (Cr)</option></select></div>
         <div class="field"><button class="btn primary" id="lgAdd" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add ledger</button></div>
@@ -4401,8 +4472,11 @@ function payToGroups(){
       .sort((a,b)=>(a.name||'').localeCompare(b.name||''))
       .map(l=>({value:'led:'+l.id, label:l.name})),
   }));
+  groups.push({label:'Creditors', items: state.creditors.filter(c=>c.active!==false)
+    .slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''))
+    .map(c=>({value:'cred:'+c.id, label:c.name+' — '+money(c.balance||0)+' due'}))});
   groups.push({label:'Suppliers', items: state.suppliers.filter(s=>s.active!==false)
-    .sort((a,b)=>(a.name||'').localeCompare(b.name||''))
+    .slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''))
     .map(s=>({value:'sup:'+s.id, label:s.name+' — '+money(s.balance||0)+' due'}))});
   return groups.filter(g=>g.items.length);
 }
@@ -4767,7 +4841,7 @@ const SETUP_ENTITY = {
   ledgers: { label:'Ledger', collection:'ledgers', list:()=>state.ledgers, fields:()=>[
     {key:'name', label:'Ledger name', type:'text'},
     {key:'group', label:'Group', type:'select', options:Object.entries(LEDGER_GROUPS).map(([k,g])=>({value:k,label:g.label})), fmt:v=>(LEDGER_GROUPS[v]||{}).label||v||'—'},
-    {key:'linkTo', label:'Links to', type:'select', options:[{value:'',label:'Nothing — plain ledger'},{value:'staff',label:'A staff member (salary / advance)'}], fmt:v=>v==='staff'?'Staff member':'—'},
+    {key:'linkTo', label:'Links to', type:'select', options:[{value:'',label:'Nothing — plain ledger'},{value:'staff',label:'A staff member (salary / advance)'},{value:'creditor',label:'A creditor'},{value:'supplier',label:'A supplier'}], fmt:v=>({staff:'Staff member',creditor:'Creditor',supplier:'Supplier'})[v]||'—'},
     {key:'balance', label:'Balance (₹, Dr positive / Cr negative) — manual correction', type:'number', fmt:v=>ledgerBalanceLabel(v)},
   ]},
   accounts: { label:'Account', collection:'accounts', list:()=>state.accounts, fields:()=>[
