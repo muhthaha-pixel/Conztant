@@ -2315,12 +2315,17 @@ async function addSupplierFromPurchase(){
 
 // One Purchase entry covers a whole invoice: several products sharing the date, supplier, payment
 // and DO reference, and a total that can be set to what the invoice actually says.
+// A line holds quantity, rate and amount together. Whichever two you type, the third follows:
+// change the quantity or the rate and the amount is recalculated; type the amount straight off the
+// invoice and the rate is worked back from it.
 let purchaseForm = {lines:[]};
-function newPurchaseLine(){ return {id:uid(), product:PRODUCT_KEYS[0], tankId:'', liters:'', rate:''}; }
-function purchaseLineAmount(L){ return num(L.liters) * num(L.rate); }
+function newPurchaseLine(){ return {id:uid(), product:PRODUCT_KEYS[0], tankId:'', liters:'', rate:'', amount:''}; }
+function purchaseLineAmount(L){ return num(L.amount); }
+function purchaseAmountFromRate(L){ return Math.round(num(L.liters) * num(L.rate) * 100)/100; }
+function purchaseRateFromAmount(L){ const q = num(L.liters); return q ? Math.round(num(L.amount)/q*10000)/10000 : num(L.rate); }
 // The invoice total wins when it is given: the difference is shared across the products in
 // proportion to their own value, so the line amounts always add up to what the supplier billed.
-// With no rates typed the split falls back to quantity, then to an even split.
+// With no amounts yet the split falls back to quantity, then to an even split.
 function apportionPurchase(lines, invoiceTotal){
   const raw = lines.map(purchaseLineAmount);
   const rawTotal = raw.reduce((s,v)=>s+v,0);
@@ -2339,7 +2344,7 @@ function renderPurchaseLines(){
   const el = $('#drLines'); if (!el) return;
   if (!purchaseForm.lines.length) purchaseForm.lines = [newPurchaseLine()];
   el.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th>Product</th><th>Tank</th><th class="num">Quantity (L)</th><th class="num">Rate (₹/L)</th><th class="num">Amount</th><th></th></tr></thead>
+      <thead><tr><th>Product</th><th>Tank</th><th class="num">Quantity (L)</th><th class="num">Rate (₹/L)</th><th class="num">Amount (₹)</th><th></th></tr></thead>
       <tbody id="drLineBody"></tbody></table></div>
     <div style="margin-top:8px;"><button class="btn ghost sm" id="drAddLine">${icon('plus')} Add product</button></div>`;
   const tbody = $('#drLineBody');
@@ -2351,18 +2356,27 @@ function renderPurchaseLines(){
       <td><select class="pProduct" style="max-width:170px;">${PRODUCT_KEYS.map(k=>`<option value="${k}" ${k===L.product?'selected':''}>${esc(state.config.products[k]||k)}</option>`).join('')}</select></td>
       <td><select class="pTank" style="max-width:170px;">${tanks.length ? tanks.map(t=>`<option value="${t.id}" ${t.id===L.tankId?'selected':''}>${esc(t.name)}</option>`).join('') : `<option value="">No tank for this product</option>`}</select></td>
       <td class="num"><input type="number" step="0.01" class="pLtr" value="${esc(String(L.liters))}" placeholder="0.00" style="width:130px;text-align:right;"></td>
-      <td class="num"><input type="number" step="0.01" class="pRate" value="${esc(String(L.rate))}" placeholder="0.00" style="width:130px;text-align:right;"></td>
-      <td class="num pAmt">${money(purchaseLineAmount(L))}</td>
+      <td class="num"><input type="number" step="0.0001" class="pRate" value="${esc(String(L.rate))}" placeholder="0.00" style="width:130px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="pAmt" value="${esc(String(L.amount))}" placeholder="0.00" style="width:150px;text-align:right;"></td>
       <td>${purchaseForm.lines.length>1 ? `<button class="btn ghost sm pRemove">${icon('trash')}</button>` : ''}</td>`;
     tbody.appendChild(tr);
-    const read = ()=>{
-      L.liters = tr.querySelector('.pLtr').value;
-      L.rate = tr.querySelector('.pRate').value;
-      tr.querySelector('.pAmt').textContent = money(purchaseLineAmount(L));
+    const ltrEl = tr.querySelector('.pLtr'), rateEl = tr.querySelector('.pRate'), amtEl = tr.querySelector('.pAmt');
+    // Only ever write back to the field the person is not typing in, so the caret stays put.
+    const fromRate = ()=>{
+      L.liters = ltrEl.value; L.rate = rateEl.value;
+      L.amount = num(L.liters) && num(L.rate) ? purchaseAmountFromRate(L) : (num(L.rate) ? 0 : L.amount);
+      amtEl.value = L.amount === '' ? '' : L.amount;
       updateDrTotal();
     };
-    tr.querySelector('.pLtr').oninput = read;
-    tr.querySelector('.pRate').oninput = read;
+    const fromAmount = ()=>{
+      L.amount = amtEl.value;
+      L.rate = purchaseRateFromAmount(L);
+      rateEl.value = num(L.liters) ? L.rate : rateEl.value;
+      updateDrTotal();
+    };
+    ltrEl.oninput = fromRate;
+    rateEl.oninput = fromRate;
+    amtEl.oninput = fromAmount;
     tr.querySelector('.pProduct').onchange = (e)=>{ L.product = e.target.value; L.tankId = ''; renderPurchaseLines(); };
     tr.querySelector('.pTank').onchange = (e)=>{ L.tankId = e.target.value; };
     const drop = tr.querySelector('.pRemove');
@@ -2381,7 +2395,7 @@ function updateDrTotal(){
   const diff = Math.round((typed - raw)*100)/100;
   hint.innerHTML = (typed>0 && diff)
     ? `Invoice total is ${money(Math.abs(diff))} ${diff>0?'more':'less'} than the products add up to — the difference is shared across them in proportion to their value.`
-    : 'Leave the invoice total empty to use the products total. Set it to match the DO when tax or rounding makes it differ.';
+    : 'Type the quantity and the rate, or the quantity and the amount — the third figure follows. Leave the invoice total empty to use the products total; set it to match the DO when tax or rounding makes it differ.';
 }
 // Each product on the invoice is still stored as its own purchase line — that is what tops up a
 // tank and values its stock — but they share a batchId so the entry can be read back as one invoice.
@@ -2504,7 +2518,7 @@ async function loadStockReceiptsList(){
       <td>${esc(state.config.products[it.product]||it.product||'—')}</td>
       <td>${esc(it.tankName||'—')}</td>
       <td class="num">${liters(it.liters)}</td>
-      <td class="num">${it.rate?money(it.rate):'—'}${num(it.rateEntered) && Math.abs(num(it.rateEntered)-num(it.rate))>0.0001?`<div class="hint" style="font-size:11px;color:var(--text-faint)">billed at ${money(it.rateEntered)}</div>`:''}</td>
+      <td class="num">${it.rate?money(it.rate):'—'}${num(it.rateEntered) && money(it.rateEntered)!==money(it.rate)?`<div class="hint" style="font-size:11px;color:var(--text-faint)">billed at ${money(it.rateEntered)}</div>`:''}</td>
       <td class="num">${it.amount?money(it.amount):'—'}</td>
       <td><span class="pill ${(!it.payFrom||it.payFrom==='credit')?'warning':'good'}">${esc(purchasePayLabel(it.payFrom))}</span></td>
       <td>${esc(it.ref||'—')}</td>
