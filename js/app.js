@@ -2947,11 +2947,13 @@ async function computeReport(from, to, f){
         r.nozzleRows.push({date:doc.date, staffName:x.staffName, nozzle: nz?nz.name:nid, tankId:n.tankId, product:n.product, opening:n.opening, closing:n.closing, testLiters:n.testLiters, transferLiters:n.transferLiters, liters:n.liters, rate:n.rate, amount:n.amount});
       });
       if (r.payTotals){ const p = x.pay||{}; r.payTotals.pos += num(p.pos); r.payTotals.upi += num(p.upi); r.payTotals.hpCard += num(p.hpCard); r.payTotals.credit += num(p.credit); r.payTotals.cash += num(p.cash); r.payTotals.expenses += num(p.expenses); }
-      // A bowser driver's gap is unbilled fuel, not a miscounted till, so the two are kept apart.
-      const ci = dutyCashInfo(x);
-      if (ci.bowser) r.bowserDiff += ci.variance; else r.cashVariance += ci.variance;
+      // A bowser duty puts nothing in the till, so its gap never reaches the cash ledger — but it is
+      // reported with the other shortages on one line rather than sitting on its own.
+      r.cashVariance += dutyCashInfo(x).variance;
       r.bowserDiff += num((x.pay||{}).bowserDiff);
-      r.duties.push(Object.assign({date:doc.date, id:dutyId, fuelAmount:dFuel, oilAmount:dOil, liters:dLtr}, {staffName:x.staffName, startTime:x.startTime, endTime:x.endTime, nozzleCount:(x.nozzleIds||[]).length, total:dFuel+dOil, pay:x.pay||{}}));
+      r.duties.push(Object.assign({date:doc.date, id:dutyId, fuelAmount:dFuel, oilAmount:dOil, liters:dLtr}, {staffName:x.staffName, startTime:x.startTime, endTime:x.endTime, nozzleCount:(x.nozzleIds||[]).length, total:dFuel+dOil, pay:x.pay||{},
+        // Carried across because the report's copy has no nozzles or cash count of its own to work it out from.
+        cashInfo:dutyCashInfo(x)}));
       if (!entryFiltered){
         (x.creditSales||[]).forEach(c=>{ if (!f.creditor || c.creditorId===f.creditor) r.creditSales.push(Object.assign({date:doc.date, staffName:x.staffName}, c)); });
         (x.oils||[]).forEach(o=>r.oils.push(Object.assign({date:doc.date, staffName:x.staffName}, o)));
@@ -3055,7 +3057,7 @@ function buildLedgerPostings(r){
   const add = (key, date, particulars, dr, cr, ref)=>{ if (key && (num(dr)||num(cr))) p.push({key, date, particulars, dr:num(dr), cr:num(cr), ref:ref||''}); };
   r.duties.forEach(d=>{
     const who = `Duty — ${d.staffName}`;
-    const ci = dutyCashInfo(d);
+    const ci = d.cashInfo || dutyCashInfo(d);
     if (ci.posted) add('cash', d.date, who + (ci.hasCount ? ' (counted)' : ''), ci.posted, 0);
     if (num(d.pay.pos)+num(d.pay.upi) && d.pay.bankAccountId) add('acct:'+d.pay.bankAccountId, d.date, who+' (POS + UPI)', num(d.pay.pos)+num(d.pay.upi), 0);
     if (num(d.pay.hpCard)){ const k = hpCardTargetKey(); if (k) add(k, d.date, who+' (HP Card)', d.pay.hpCard, 0); }
@@ -3467,13 +3469,13 @@ function renderReportBody(body, cfg, r, c){
     r.expenses.forEach(it=>{ const k = it.category || 'Other'; byHead[k] = (byHead[k]||0) + num(it.amount); });
     Object.entries(byHead).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>plDr.push([`To ${esc(k)}`, v]));
     if (num(r.salary)) plDr.push(['To Salary', r.salary]);
-    if (num(r.cashShort)) plDr.push(['To Cash shortage (till count)', r.cashShort]);
+    if (num(r.cashShort)) plDr.push(['To Cash shortage', r.cashShort]);
     if (num(r.bowserLoss)) plDr.push(['To Bowser fuel shortage', r.bowserLoss]);
     Object.entries(r.otherExpenseDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1])
       .forEach(([k,v])=>plDr.push([`To ${esc(k)}`, v]));
     // Nothing at all on the debit side still needs a line, so the account reads sensibly.
     if (!plDr.length) plDr.push(['To Expenses', 0]);
-    if (num(r.cashOver)) plCr.push(['By Cash excess (till count)', r.cashOver]);
+    if (num(r.cashOver)) plCr.push(['By Cash excess', r.cashOver]);
     if (num(r.bowserGain)) plCr.push(['By Bowser fuel excess', r.bowserGain]);
     const incomeHeads = Object.entries(r.otherIncomeDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]);
     if (incomeHeads.length) incomeHeads.forEach(([k,v])=>plCr.push([`By ${esc(k)}`, v]));
@@ -3886,11 +3888,11 @@ function exportReportExcel(rep){
           r.expenses.forEach(it=>{ const k = it.category || 'Other'; byHead[k] = (byHead[k]||0) + num(it.amount); });
           Object.entries(byHead).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>dr.push([`To ${k}`, r2(v)]));
           if (num(r.salary)) dr.push(['To Salary', r2(r.salary)]);
-          if (num(r.cashShort)) dr.push(['To Cash shortage (till count)', r2(r.cashShort)]);
+          if (num(r.cashShort)) dr.push(['To Cash shortage', r2(r.cashShort)]);
           if (num(r.bowserLoss)) dr.push(['To Bowser fuel shortage', r2(r.bowserLoss)]);
           Object.entries(r.otherExpenseDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>dr.push([`To ${k}`, r2(v)]));
           if (!dr.length) dr.push(['To Expenses', 0]);
-          if (num(r.cashOver)) cr.push(['By Cash excess (till count)', r2(r.cashOver)]);
+          if (num(r.cashOver)) cr.push(['By Cash excess', r2(r.cashOver)]);
           if (num(r.bowserGain)) cr.push(['By Bowser fuel excess', r2(r.bowserGain)]);
           const incHeads = Object.entries(r.otherIncomeDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]);
           if (incHeads.length) incHeads.forEach(([k,v])=>cr.push([`By ${k}`, r2(v)]));
