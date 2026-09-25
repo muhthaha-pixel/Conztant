@@ -3782,6 +3782,27 @@ function renderReportBody(body, cfg, r, c){
       });
     });
   }
+  // Detail the Excel export carries but the screen shows as charts or leaves out. Printed only, so
+  // the PDF is as complete as the spreadsheet without burying the screen in rows.
+  if (has('trend')){
+    const days = []; for (let dd=r.from; dd<=r.to; dd=addDays(dd,1)) days.push(dd);
+    const byDayDuties = {};
+    r.duties.forEach(x=>{ (byDayDuties[x.date] = byDayDuties[x.date]||[]).push(x); });
+    const rows = days.filter(dd=>num(r.byDay[dd]) || (byDayDuties[dd]||[]).length).map(dd=>{
+      const list = byDayDuties[dd]||[];
+      const fuel = list.reduce((s,x)=>s+num(x.fuelAmount),0), oil = list.reduce((s,x)=>s+num(x.oilAmount),0);
+      return [fmtDateLabel(dd), list.length, liters(list.reduce((s,x)=>s+num(x.liters),0)), money(fuel), money(oil), money(fuel+oil)];
+    });
+    parts.push(`<div class="print-only">${table('Daily sales', [{label:'Date'},{label:'Duties',num:true},{label:'Liters',num:true},{label:'Fuel',num:true},{label:'Oils',num:true},{label:'Total',num:true}],
+      rows, ['Total','', liters(r.liters), money(r.fuelRevenue), money(r.oilRevenue), money(r.revenue)])}</div>`);
+  }
+  if (has('duties') || has('products')){
+    const rows = r.nozzleRows.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(n=>[
+      fmtDateLabel(n.date), esc(n.staffName), esc(n.nozzle), esc(state.config.products[n.product]||n.product||'—'),
+      numFmt(n.opening), numFmt(n.closing), liters(n.testLiters), liters(n.transferLiters), liters(n.liters), money(n.rate), money(n.amount)]);
+    parts.push(`<div class="print-only">${table('Nozzle readings', [{label:'Date'},{label:'Staff'},{label:'Nozzle'},{label:'Product'},{label:'Opening',num:true},{label:'Closing',num:true},{label:'Test',num:true},{label:'Transfer',num:true},{label:'Sale',num:true},{label:'Rate',num:true},{label:'Amount',num:true}],
+      rows)}</div>`);
+  }
   body.innerHTML = parts.join('');
   if (has('stock')){
     if ($('#repTankCards')) renderTankCards($('#repTankCards'), {});
