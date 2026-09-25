@@ -187,3 +187,34 @@
     table{font-size:12.5px;}
     th,td{padding:7px 8px;}
   }
+
+  /* ---------- printing (the browser's "Save as PDF" uses these) ---------- */
+  .print-only{display:none;}
+  @media print{
+    /* Print on white with plain borders, whatever theme is on screen. */
+    :root{--bg:#fff;--surface:#fff;--surface-2:#f2f2f2;--border:#999;--text:#000;--text-muted:#333;--text-faint:#555;
+          --brand:#000;--brand-strong:#000;--brand-tint:#fff;--shadow:none;}
+    @page{margin:12mm;}
+    body{background:#fff;font-size:11pt;}
+    .print-only{display:block;}
+    /* Chrome, the menu, the report controls and every button are screen furniture. */
+    header.top, .side, nav.tabs, .no-print, .btn, footer.note, #modalRoot{display:none !important;}
+    .app{max-width:none;padding:0;}
+    .shell{display:block;}
+    .main{padding:0;}
+    .card{box-shadow:none;border:1px solid var(--border);break-inside:avoid;}
+    .kpi{border-top:2px solid #000;}
+    .grid-kpi{grid-template-columns:repeat(4,1fr);}
+    .table-wrap{overflow:visible;}
+    table{font-size:9.5pt;}
+    th{background:#eee !important;-webkit-print-color-adjust:exact;print-color-adjust:exact;position:static;}
+    tbody tr:nth-child(even) td{background:#fafafa !important;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+    tbody tr:hover td{background:transparent !important;}
+    /* Repeat column headers when a long statement runs over a page. */
+    thead{display:table-header-group;}
+    tfoot{display:table-row-group;}
+    tr{break-inside:avoid;}
+    .section-head{break-after:avoid;}
+    .pill{border:1px solid var(--border);}
+    .banner{border:1px solid var(--border);}
+  }

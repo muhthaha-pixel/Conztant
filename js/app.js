@@ -3297,7 +3297,7 @@ async function renderReports(mount){
   mount.innerHTML = `
     <h1 class="page-title">Reports</h1>
     <p class="page-sub">Pick the report you need, the period it covers, and any filters. The Excel export follows the same settings.</p>
-    <div class="card card-pad" style="margin-bottom:16px;">
+    <div class="card card-pad no-print" id="rpControls" style="margin-bottom:16px;">
       <div class="form-grid">
         <div class="field" style="grid-column:span 2;"><label>Report</label><select id="rpReport">
           ${REPORT_TYPES.map(t=>`<option value="${t.id}" ${cfg.report===t.id?'selected':''}>${esc(t.label)}</option>`).join('')}
@@ -3331,10 +3331,12 @@ async function renderReports(mount){
       <div class="row" style="margin-top:14px;">
         <button class="btn primary" id="rpRun">${icon('chart')} Run report</button>
         <button class="btn" id="rpExport" ${window.XLSX?'':'disabled title="Excel library did not load"'}>Export to Excel</button>
+        <button class="btn" id="rpPrint">Save as PDF / Print</button>
         <button class="btn ghost" id="rpReset">Reset</button>
         <span class="hint" id="rpNote" style="color:var(--text-faint);font-size:12px;"></span>
       </div>
     </div>
+    <div id="printHead" class="print-only"></div>
     <div id="repBody"><div class="card empty">Crunching the numbers…</div></div>
   `;
   const syncReport = ()=>{
@@ -3366,6 +3368,7 @@ async function renderReports(mount){
   $('#rpReset').onclick = ()=>{ repCfg = defaultReportCfg(); saveReportCfg(); renderReports(mount); };
   $('#rpRun').onclick = ()=>runReport();
   $('#rpExport').onclick = ()=>runReport(true);
+  $('#rpPrint').onclick = ()=>printReport();
   await runReport();
 }
 
@@ -3774,6 +3777,30 @@ function renderReportBody(body, cfg, r, c){
 
 // Builds a multi-sheet .xlsx for the current report entirely in the browser (SheetJS) and
 // triggers the download. Numbers are written as numbers so Excel can total them.
+// Every report type renders into the same body, so one print path covers all of them. The browser's
+// own print dialog turns it into a PDF, which keeps the text selectable and needs no extra library.
+function printReport(){
+  const head = $('#printHead');
+  if (!head || !lastReport){ window.print(); return; }
+  const {cfg, main:r, cmp:c} = lastReport;
+  const type = (REPORT_TYPES.find(t=>t.id===cfg.report)||{}).label || 'Report';
+  const filt = [
+    cfg.staff && 'Staff: '+((state.staff.find(s=>s.id===cfg.staff)||{}).name||''),
+    cfg.product && 'Product: '+(state.config.products[cfg.product]||''),
+    cfg.nozzle && 'Nozzle: '+((state.nozzles.find(n=>n.id===cfg.nozzle)||{}).name||''),
+    cfg.creditor && 'Creditor: '+((state.creditors.find(x=>x.id===cfg.creditor)||{}).name||''),
+    cfg.method && 'Method: '+cfg.method,
+    cfg.basis==='accrual' && 'Accrued basis',
+  ].filter(Boolean);
+  head.innerHTML = `
+    <div style="border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:14px;">
+      <div style="font-size:18px;font-weight:800;">${esc(state.config.stationName||'Fuel Ledger')}</div>
+      <div style="font-size:14px;margin-top:2px;">${esc(type)} — ${esc(rangeLabel(r.from, r.to))}${c?` (compared with ${esc(rangeLabel(c.from, c.to))})`:''}</div>
+      ${filt.length?`<div style="font-size:11.5px;margin-top:2px;">${esc(filt.join(' · '))}</div>`:''}
+      <div style="font-size:11px;margin-top:4px;">Printed ${esc(fmtDateLabel(todayStr()))}${state.currentUser?' by '+esc(state.currentUser.name):''}</div>
+    </div>`;
+  window.print();
+}
 function exportReportExcel(rep){
   if (!rep || !window.XLSX) return;
   const {cfg, main:r, cmp:c} = rep;
