@@ -919,7 +919,9 @@ function dutyIsBowser(duty){
   if (!entries.length) return false;
   return entries.every(n=>{
     const t = n.tankId && state.tanks.find(x=>x.id===n.tankId);
-    return t && t.isBowser;
+    // A tank named "Bowser" is treated as one even before the box is ticked, so stations that
+    // already run one do not have to set anything up for their figures to come out right.
+    return t && (t.isBowser || /bowser/i.test(t.name||''));
   });
 }
 function dutyCashInfo(duty){
@@ -930,8 +932,11 @@ function dutyCashInfo(duty){
   const bowser = dutyIsBowser(duty);
   // On a bowser duty nothing is expected in the till unless cash was actually counted, so the whole
   // residual is the shortage. Elsewhere an uncounted duty posts what it should have taken.
-  const posted = pay.cashPosted!=null ? num(pay.cashPosted) : (hasCount ? counted : (bowser ? 0 : expected));
-  const variance = pay.variance!=null ? num(pay.variance) : (posted - expected);
+  // A bowser driver with no count in front of them holds nothing, whatever an earlier save recorded
+  // — so the stored figures are ignored in that case rather than leaving the gap unaccounted for.
+  const bowserNoCash = bowser && !hasCount;
+  const posted = bowserNoCash ? 0 : (pay.cashPosted!=null ? num(pay.cashPosted) : (hasCount ? counted : expected));
+  const variance = bowserNoCash ? -expected : (pay.variance!=null ? num(pay.variance) : (posted - expected));
   return {expected, counted, hasCount, bowser, posted, variance,
           postedHistorically: pay.cashPosted!=null ? num(pay.cashPosted) : expected};
 }
