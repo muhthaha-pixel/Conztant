@@ -2008,15 +2008,16 @@ function renderPurchase(mount){
       <div class="form-grid">
         <div class="field"><label>Date</label><input type="date" id="drDate" value="${todayStr()}" max="${todayStr()}"></div>
         <div class="field"><label>Supplier</label><select id="drSupplier"><option value="">Select supplier…</option>${state.suppliers.filter(s=>s.active!==false).map(s=>`<option value="${s.id}">${esc(s.name)} — ${money(s.balance||0)} due</option>`).join('')}</select></div>
-        <div class="field"><label>Product</label><select id="drProduct">${PRODUCT_KEYS.map(k=>`<option value="${k}">${esc(state.config.products[k]||k)}</option>`).join('')}</select></div>
-        <div class="field"><label>Tank</label><select id="drTank"></select></div>
-        <div class="field"><label>Quantity (L)</label><input type="number" step="0.01" id="drLiters" placeholder="0.00"></div>
-        <div class="field"><label>Rate (₹/L)</label><input type="number" step="0.01" id="drRate" placeholder="0.00"></div>
-        <div class="field"><label>Total amount</label><input type="text" id="drTotal" value="₹0" disabled></div>
         <div class="field"><label>Payment</label><select id="drPay">${purchasePayOptions('credit')}</select></div>
         <div class="field"><label>Invoice / DO ref</label><input type="text" id="drRef" placeholder="e.g. DO-4521"></div>
+      </div>
+      <div id="drLines" style="margin-top:12px;"></div>
+      <div class="form-grid" style="margin-top:12px;">
+        <div class="field"><label>Products total</label><input type="text" id="drLinesTotal" value="₹0" disabled></div>
+        <div class="field"><label>Invoice total (₹)</label><input type="number" step="0.01" id="drTotal" placeholder="same as products total"></div>
         <div class="field"><button class="btn primary" id="drSave" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add purchase</button></div>
       </div>
+      <div id="drTotalHint" style="font-size:12px;color:var(--text-faint);margin-top:6px;"></div>
       <div id="drMsg" style="font-size:13px;margin-top:4px;"></div>
     </div>
 
@@ -2049,10 +2050,8 @@ function renderPurchase(mount){
       ${state.suppliers.length?`<tfoot><tr><td colspan="3" style="font-weight:700;">Total owed</td><td class="num" style="font-weight:700;">${money(state.suppliers.reduce((s,x)=>s+num(x.balance),0))}</td><td colspan="2"></td></tr></tfoot>`:''}
     </table></div></div>
   `;
-  populateDrTankOptions();
-  $('#drProduct').onchange = populateDrTankOptions;
-  $('#drLiters').oninput = updateDrTotal;
-  $('#drRate').oninput = updateDrTotal;
+  renderPurchaseLines();
+  $('#drTotal').oninput = updateDrTotal;
   $('#drSave').onclick = addStockReceipt;
   $('#spAdd').onclick = addSupplierFromPurchase;
   $$('#viewMount [data-openbal]').forEach(b=>b.onclick=()=>openOpeningBalanceModal('supplier', b.dataset.openbal));
@@ -2314,45 +2313,115 @@ async function addSupplierFromPurchase(){
   renderPurchase($('#viewMount'));
 }
 
-function populateDrTankOptions(){
-  const sel = $('#drTank'); if (!sel) return;
-  const productKey = $('#drProduct') ? $('#drProduct').value : PRODUCT_KEYS[0];
-  const matching = state.tanks.filter(t=>t.active!==false && t.product===productKey);
-  sel.innerHTML = matching.length ? matching.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('') : `<option value="">No tank set up for this product</option>`;
+// One Purchase entry covers a whole invoice: several products sharing the date, supplier, payment
+// and DO reference, and a total that can be set to what the invoice actually says.
+let purchaseForm = {lines:[]};
+function newPurchaseLine(){ return {id:uid(), product:PRODUCT_KEYS[0], tankId:'', liters:'', rate:''}; }
+function purchaseLineAmount(L){ return num(L.liters) * num(L.rate); }
+// The invoice total wins when it is given: the difference is shared across the products in
+// proportion to their own value, so the line amounts always add up to what the supplier billed.
+// With no rates typed the split falls back to quantity, then to an even split.
+function apportionPurchase(lines, invoiceTotal){
+  const raw = lines.map(purchaseLineAmount);
+  const rawTotal = raw.reduce((s,v)=>s+v,0);
+  const target = num(invoiceTotal)>0 ? num(invoiceTotal) : rawTotal;
+  if (!target) return raw.map(()=>0);
+  let weights = raw, wTotal = rawTotal;
+  if (!wTotal){ weights = lines.map(L=>num(L.liters)); wTotal = weights.reduce((s,v)=>s+v,0); }
+  if (!wTotal){ weights = lines.map(()=>1); wTotal = lines.length; }
+  const out = weights.map(w=>Math.round(w/wTotal*target*100)/100);
+  // Rounding crumbs land on the largest line, so the total comes out exact.
+  const diff = Math.round((target - out.reduce((s,v)=>s+v,0))*100)/100;
+  if (diff){ let k = 0; out.forEach((v,i)=>{ if (v>out[k]) k = i; }); out[k] = Math.round((out[k]+diff)*100)/100; }
+  return out;
 }
-
+function renderPurchaseLines(){
+  const el = $('#drLines'); if (!el) return;
+  if (!purchaseForm.lines.length) purchaseForm.lines = [newPurchaseLine()];
+  el.innerHTML = `<div class="table-wrap"><table>
+      <thead><tr><th>Product</th><th>Tank</th><th class="num">Quantity (L)</th><th class="num">Rate (₹/L)</th><th class="num">Amount</th><th></th></tr></thead>
+      <tbody id="drLineBody"></tbody></table></div>
+    <div style="margin-top:8px;"><button class="btn ghost sm" id="drAddLine">${icon('plus')} Add product</button></div>`;
+  const tbody = $('#drLineBody');
+  purchaseForm.lines.forEach(L=>{
+    const tanks = state.tanks.filter(t=>t.active!==false && t.product===L.product);
+    if (!tanks.some(t=>t.id===L.tankId)) L.tankId = tanks.length ? tanks[0].id : '';
+    const tr = document.createElement('tr'); tr.dataset.id = L.id;
+    tr.innerHTML = `
+      <td><select class="pProduct" style="max-width:170px;">${PRODUCT_KEYS.map(k=>`<option value="${k}" ${k===L.product?'selected':''}>${esc(state.config.products[k]||k)}</option>`).join('')}</select></td>
+      <td><select class="pTank" style="max-width:170px;">${tanks.length ? tanks.map(t=>`<option value="${t.id}" ${t.id===L.tankId?'selected':''}>${esc(t.name)}</option>`).join('') : `<option value="">No tank for this product</option>`}</select></td>
+      <td class="num"><input type="number" step="0.01" class="pLtr" value="${esc(String(L.liters))}" placeholder="0.00" style="width:130px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.01" class="pRate" value="${esc(String(L.rate))}" placeholder="0.00" style="width:130px;text-align:right;"></td>
+      <td class="num pAmt">${money(purchaseLineAmount(L))}</td>
+      <td>${purchaseForm.lines.length>1 ? `<button class="btn ghost sm pRemove">${icon('trash')}</button>` : ''}</td>`;
+    tbody.appendChild(tr);
+    const read = ()=>{
+      L.liters = tr.querySelector('.pLtr').value;
+      L.rate = tr.querySelector('.pRate').value;
+      tr.querySelector('.pAmt').textContent = money(purchaseLineAmount(L));
+      updateDrTotal();
+    };
+    tr.querySelector('.pLtr').oninput = read;
+    tr.querySelector('.pRate').oninput = read;
+    tr.querySelector('.pProduct').onchange = (e)=>{ L.product = e.target.value; L.tankId = ''; renderPurchaseLines(); };
+    tr.querySelector('.pTank').onchange = (e)=>{ L.tankId = e.target.value; };
+    const drop = tr.querySelector('.pRemove');
+    if (drop) drop.onclick = ()=>{ purchaseForm.lines = purchaseForm.lines.filter(x=>x.id!==L.id); renderPurchaseLines(); };
+  });
+  $('#drAddLine').onclick = ()=>{ purchaseForm.lines.push(newPurchaseLine()); renderPurchaseLines(); };
+  updateDrTotal();
+}
 function updateDrTotal(){
-  const ltrEl = $('#drLiters'), rateEl = $('#drRate'), totalEl = $('#drTotal');
-  if (!totalEl) return;
-  const ltr = num(ltrEl && ltrEl.value), rate = num(rateEl && rateEl.value);
-  totalEl.value = money(ltr*rate);
+  const linesEl = $('#drLinesTotal'), totalEl = $('#drTotal'), hint = $('#drTotalHint');
+  if (!linesEl || !totalEl) return;
+  const raw = purchaseForm.lines.reduce((s,L)=>s+purchaseLineAmount(L), 0);
+  linesEl.value = money(raw);
+  if (!hint) return;
+  const typed = num(totalEl.value);
+  const diff = Math.round((typed - raw)*100)/100;
+  hint.innerHTML = (typed>0 && diff)
+    ? `Invoice total is ${money(Math.abs(diff))} ${diff>0?'more':'less'} than the products add up to — the difference is shared across them in proportion to their value.`
+    : 'Leave the invoice total empty to use the products total. Set it to match the DO when tax or rounding makes it differ.';
 }
-
+// Each product on the invoice is still stored as its own purchase line — that is what tops up a
+// tank and values its stock — but they share a batchId so the entry can be read back as one invoice.
 async function addStockReceipt(){
   const msg = $('#drMsg');
-  const date = $('#drDate').value, productKey = $('#drProduct').value, tankId = $('#drTank').value;
-  const ltr = num($('#drLiters').value), rate = num($('#drRate').value);
+  const date = $('#drDate').value;
   const supplierId = $('#drSupplier').value, payFrom = $('#drPay').value, ref = $('#drRef').value.trim();
+  const lines = purchaseForm.lines.filter(L=>num(L.liters)>0);
   if (!state.dbReady){ msg.innerHTML = `<span style="color:var(--critical)">Live data isn't connected.</span>`; return; }
-  if (!tankId){ msg.innerHTML = `<span style="color:var(--critical)">No tank is set up for this product yet — add one in Setup → Tanks.</span>`; return; }
   if (!supplierId){ msg.innerHTML = `<span style="color:var(--critical)">Select the supplier.</span>`; return; }
-  if (!(ltr>0)){ msg.innerHTML = `<span style="color:var(--critical)">Enter the quantity received.</span>`; return; }
+  if (!lines.length){ msg.innerHTML = `<span style="color:var(--critical)">Enter the quantity for at least one product.</span>`; return; }
+  const noTank = lines.find(L=>!L.tankId);
+  if (noTank){ msg.innerHTML = `<span style="color:var(--critical)">No tank is set up for ${esc(state.config.products[noTank.product]||noTank.product)} yet — add one in Setup → Tanks.</span>`; return; }
   $('#drSave').disabled = true;
   try{
-    const tank = state.tanks.find(t=>t.id===tankId);
+    const amounts = apportionPurchase(lines, $('#drTotal').value);
+    const batchId = uid();
+    const items = lines.map((L,i)=>{
+      const tank = state.tanks.find(t=>t.id===L.tankId);
+      const ltr = num(L.liters), amount = amounts[i];
+      // The rate stored is what the line actually worked out at, so rate x quantity always equals
+      // the amount; the rate as typed is kept beside it when an invoice total moved it.
+      const rate = ltr ? Math.round(amount/ltr*10000)/10000 : num(L.rate);
+      return {id:uid(), batchId, date, product:L.product, tankId:L.tankId, tankName: tank?tank.name:'',
+        liters:ltr, rate, rateEntered:num(L.rate), amount,
+        supplierId, supplier:supplierName(supplierId), payFrom, ref, by: state.currentUser?state.currentUser.name:''};
+    });
     const monthId = monthIdOf(date);
-    const item = {id:uid(), date, product:productKey, tankId, tankName: tank?tank.name:'', liters:ltr, rate, amount:ltr*rate,
-      supplierId, supplier:supplierName(supplierId), payFrom, ref, by: state.currentUser?state.currentUser.name:''};
     const data = (await getMonthDoc('stockReceiptsMonthly', monthId)) || {items:[], totalLiters:0, totalAmount:0};
-    data.items = (data.items||[]).concat([item]);
+    data.items = (data.items||[]).concat(items);
     data.totalLiters = data.items.reduce((s,i)=>s+num(i.liters),0);
     data.totalAmount = data.items.reduce((s,i)=>s+num(i.amount),0);
     await setMonthDoc('stockReceiptsMonthly', monthId, data);
-    await applyPurchase(item, +1);
-    await logActivity({entity:'Purchase', entityLabel:item.supplier+' · '+fmtDateLabel(date), action:'add', summary:`Added ${liters(ltr)} for ${money(item.amount)} (${purchasePayLabel(payFrom)})`});
-    msg.innerHTML = `<span style="color:var(--good)">Purchase recorded — ${esc(tank?tank.name:'tank')} stock updated${payFrom==='credit'?' and supplier balance increased':''}.</span>`;
-    $('#drLiters').value=''; $('#drRate').value=''; $('#drRef').value='';
-    updateDrTotal();
+    for (const it of items) await applyPurchase(it, +1);
+    const totalLtr = items.reduce((s,i)=>s+num(i.liters),0);
+    const totalAmt = items.reduce((s,i)=>s+num(i.amount),0);
+    await logActivity({entity:'Purchase', entityLabel:supplierName(supplierId)+' · '+fmtDateLabel(date), action:'add',
+      summary:`Added ${items.length} product(s), ${liters(totalLtr)} for ${money(totalAmt)} (${purchasePayLabel(payFrom)})`});
+    msg.innerHTML = `<span style="color:var(--good)">Purchase recorded — ${items.length} product(s) totalling ${money(totalAmt)}; stock updated${payFrom==='credit'?' and supplier balance increased':''}.</span>`;
+    purchaseForm.lines = [newPurchaseLine()];
     renderPurchase($('#viewMount'));
   }catch(e){
     msg.innerHTML = `<span style="color:var(--critical)">Couldn't save: ${esc(e.message||'error')}</span>`;
@@ -2379,7 +2448,11 @@ function editStockReceipt(monthId, item){
       if (!state.dbReady) throw new Error("Live data isn't connected.");
       if (!(num(out.liters)>0)) throw new Error('Enter the quantity.');
       const changes = diffFields(fields, item, out);
-      const newItem = Object.assign({}, item, out, {id:item.id, amount:num(out.liters)*num(out.rate), supplier:supplierName(out.supplierId), tankName:(state.tanks.find(t=>t.id===out.tankId)||{}).name||''});
+      // A line that came off an invoice total carries an amount the rate alone cannot reproduce to
+      // the paisa. Leave it alone unless the quantity or rate is what actually changed.
+      const priced = num(out.liters)!==num(item.liters) || num(out.rate)!==num(item.rate);
+      const amount = priced ? num(out.liters)*num(out.rate) : num(item.amount);
+      const newItem = Object.assign({}, item, out, {id:item.id, amount, supplier:supplierName(out.supplierId), tankName:(state.tanks.find(t=>t.id===out.tankId)||{}).name||''});
       const newMonth = monthIdOf(out.date);
       // Reverse the old purchase in full, then apply the new one — covers a changed tank, supplier,
       // payment source, quantity or month in one path.
@@ -2431,7 +2504,7 @@ async function loadStockReceiptsList(){
       <td>${esc(state.config.products[it.product]||it.product||'—')}</td>
       <td>${esc(it.tankName||'—')}</td>
       <td class="num">${liters(it.liters)}</td>
-      <td class="num">${it.rate?money(it.rate):'—'}</td>
+      <td class="num">${it.rate?money(it.rate):'—'}${num(it.rateEntered) && Math.abs(num(it.rateEntered)-num(it.rate))>0.0001?`<div class="hint" style="font-size:11px;color:var(--text-faint)">billed at ${money(it.rateEntered)}</div>`:''}</td>
       <td class="num">${it.amount?money(it.amount):'—'}</td>
       <td><span class="pill ${(!it.payFrom||it.payFrom==='credit')?'warning':'good'}">${esc(purchasePayLabel(it.payFrom))}</span></td>
       <td>${esc(it.ref||'—')}</td>
