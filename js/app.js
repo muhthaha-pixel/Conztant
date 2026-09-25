@@ -911,14 +911,28 @@ function countedEntered(cashCount){
 // that, and reports show the shortage without every duty having to be opened and saved again.
 // `postedHistorically` is what actually reached the ledger at the time, which is what a reversal
 // must undo.
+// A bowser is a mobile tank: its driver dispenses fuel and bills it to credit customers, holding no
+// cash. Whatever the fuel dispensed is worth but was never billed is a fuel shortage, so it belongs
+// in the P&L rather than sitting in Cash in hand as money nobody has.
+function dutyIsBowser(duty){
+  const entries = Object.values((duty && duty.nozzles) || {});
+  if (!entries.length) return false;
+  return entries.every(n=>{
+    const t = n.tankId && state.tanks.find(x=>x.id===n.tankId);
+    return t && t.isBowser;
+  });
+}
 function dutyCashInfo(duty){
   const pay = (duty && duty.pay) || {};
   const expected = num(pay.cash);
   const hasCount = countedEntered(duty && duty.cashCount);
   const counted = hasCount ? countedCash(duty.cashCount) : null;
-  const posted = pay.cashPosted!=null ? num(pay.cashPosted) : (hasCount ? counted : expected);
-  const variance = pay.variance!=null ? num(pay.variance) : (hasCount ? counted - expected : 0);
-  return {expected, counted, hasCount, posted, variance,
+  const bowser = dutyIsBowser(duty);
+  // On a bowser duty nothing is expected in the till unless cash was actually counted, so the whole
+  // residual is the shortage. Elsewhere an uncounted duty posts what it should have taken.
+  const posted = pay.cashPosted!=null ? num(pay.cashPosted) : (hasCount ? counted : (bowser ? 0 : expected));
+  const variance = pay.variance!=null ? num(pay.variance) : (posted - expected);
+  return {expected, counted, hasCount, bowser, posted, variance,
           postedHistorically: pay.cashPosted!=null ? num(pay.cashPosted) : expected};
 }
 let dutyForm = null;      // null = list view; object = add/edit form
@@ -2928,7 +2942,9 @@ async function computeReport(from, to, f){
         r.nozzleRows.push({date:doc.date, staffName:x.staffName, nozzle: nz?nz.name:nid, tankId:n.tankId, product:n.product, opening:n.opening, closing:n.closing, testLiters:n.testLiters, transferLiters:n.transferLiters, liters:n.liters, rate:n.rate, amount:n.amount});
       });
       if (r.payTotals){ const p = x.pay||{}; r.payTotals.pos += num(p.pos); r.payTotals.upi += num(p.upi); r.payTotals.hpCard += num(p.hpCard); r.payTotals.credit += num(p.credit); r.payTotals.cash += num(p.cash); r.payTotals.expenses += num(p.expenses); }
-      r.cashVariance += dutyCashInfo(x).variance;
+      // A bowser driver's gap is unbilled fuel, not a miscounted till, so the two are kept apart.
+      const ci = dutyCashInfo(x);
+      if (ci.bowser) r.bowserDiff += ci.variance; else r.cashVariance += ci.variance;
       r.bowserDiff += num((x.pay||{}).bowserDiff);
       r.duties.push(Object.assign({date:doc.date, id:dutyId, fuelAmount:dFuel, oilAmount:dOil, liters:dLtr}, {staffName:x.staffName, startTime:x.startTime, endTime:x.endTime, nozzleCount:(x.nozzleIds||[]).length, total:dFuel+dOil, pay:x.pay||{}}));
       if (!entryFiltered){
@@ -3447,13 +3463,13 @@ function renderReportBody(body, cfg, r, c){
     Object.entries(byHead).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>plDr.push([`To ${esc(k)}`, v]));
     if (num(r.salary)) plDr.push(['To Salary', r.salary]);
     if (num(r.cashShort)) plDr.push(['To Cash shortage (till count)', r.cashShort]);
-    if (num(r.bowserLoss)) plDr.push(['To Bowser billing difference', r.bowserLoss]);
+    if (num(r.bowserLoss)) plDr.push(['To Bowser fuel shortage', r.bowserLoss]);
     Object.entries(r.otherExpenseDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1])
       .forEach(([k,v])=>plDr.push([`To ${esc(k)}`, v]));
     // Nothing at all on the debit side still needs a line, so the account reads sensibly.
     if (!plDr.length) plDr.push(['To Expenses', 0]);
     if (num(r.cashOver)) plCr.push(['By Cash excess (till count)', r.cashOver]);
-    if (num(r.bowserGain)) plCr.push(['By Bowser billing difference', r.bowserGain]);
+    if (num(r.bowserGain)) plCr.push(['By Bowser fuel excess', r.bowserGain]);
     const incomeHeads = Object.entries(r.otherIncomeDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]);
     if (incomeHeads.length) incomeHeads.forEach(([k,v])=>plCr.push([`By ${esc(k)}`, v]));
     else plCr.push(['By Other income', r.otherIncome]);
@@ -3845,11 +3861,11 @@ function exportReportExcel(rep){
           Object.entries(byHead).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>dr.push([`To ${k}`, r2(v)]));
           if (num(r.salary)) dr.push(['To Salary', r2(r.salary)]);
           if (num(r.cashShort)) dr.push(['To Cash shortage (till count)', r2(r.cashShort)]);
-          if (num(r.bowserLoss)) dr.push(['To Bowser billing difference', r2(r.bowserLoss)]);
+          if (num(r.bowserLoss)) dr.push(['To Bowser fuel shortage', r2(r.bowserLoss)]);
           Object.entries(r.otherExpenseDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>dr.push([`To ${k}`, r2(v)]));
           if (!dr.length) dr.push(['To Expenses', 0]);
           if (num(r.cashOver)) cr.push(['By Cash excess (till count)', r2(r.cashOver)]);
-          if (num(r.bowserGain)) cr.push(['By Bowser billing difference', r2(r.bowserGain)]);
+          if (num(r.bowserGain)) cr.push(['By Bowser fuel excess', r2(r.bowserGain)]);
           const incHeads = Object.entries(r.otherIncomeDetail||{}).filter(([,v])=>num(v)).sort((a,b)=>b[1]-a[1]);
           if (incHeads.length) incHeads.forEach(([k,v])=>cr.push([`By ${k}`, r2(v)]));
           else cr.push(['By Other income', r2(r.otherIncome)]);
@@ -4650,6 +4666,7 @@ const SETUP_ENTITY = {
     {key:'capacityL', label:'Capacity (L)', type:'number', fmt:v=>liters(v)},
     {key:'currentStockL', label:'Current stock (L) — manual correction', type:'number', fmt:v=>liters(v)},
     {key:'costRate', label:'Stock cost rate (₹/L)', type:'number', fmt:v=>money(v)},
+    {key:'isBowser', label:'This is a bowser (mobile tank)', type:'checkbox', fmt:v=>v?'Yes':'No'},
   ]},
   nozzles: { label:'Nozzle', collection:'nozzles', list:()=>state.nozzles, fields:()=>[
     {key:'name', label:'Nozzle / PU name', type:'text'},
@@ -4767,6 +4784,7 @@ function renderSetupTanks(body){
         <div class="field"><label>Capacity (L)</label><input type="number" id="tkCap" placeholder="0"></div>
         <div class="field"><label>Opening stock (L)</label><input type="number" id="tkStock" placeholder="0"></div>
         <div class="field"><label>Purchase rate of that stock (₹/L)</label><input type="number" step="0.01" id="tkCost" placeholder="0.00"></div>
+        <div class="field"><label class="toggle" style="margin-top:18px;"><input type="checkbox" id="tkBowser"> This is a bowser (mobile tank)</label></div>
         <div class="field"><button class="btn primary" id="tkAdd" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add tank</button></div>
       </div>
       <div class="hint" style="color:var(--text-faint);font-size:12px;">The purchase rate is what the fuel already in the tank cost you. It values opening and closing stock in the P&amp;L until a delivery is recorded on the Purchase tab, after which the latest purchase rate is used automatically.</div>
@@ -4801,7 +4819,7 @@ function renderSetupTanks(body){
     <div class="card"><div class="table-wrap"><table>
       <thead><tr><th>Name</th><th>Product</th><th class="num">Capacity</th><th class="num">Current stock</th><th class="num">Cost rate</th><th>Status</th><th></th></tr></thead>
       <tbody>${state.tanks.length? byName(state.tanks).map(t=>`<tr>
-        <td>${esc(t.name)}</td><td>${esc(state.config.products[t.product]||t.product)}</td>
+        <td>${esc(t.name)}${t.isBowser?` <span class="pill neutral">bowser</span>`:''}</td><td>${esc(state.config.products[t.product]||t.product)}</td>
         <td class="num">${liters(t.capacityL)}</td><td class="num">${liters(t.currentStockL)}</td>
         <td class="num">${num(t.costRate)?money(t.costRate):'—'}</td>
         <td><span class="pill ${t.active!==false?'good':'neutral'}">${t.active!==false?'Active':'Inactive'}</span></td>
@@ -4838,7 +4856,7 @@ function renderSetupTanks(body){
     await state.db.collection('tanks').add({
       name, product: $('#tkProduct').value, capacityL: num($('#tkCap').value),
       currentStockL: num($('#tkStock').value), openingStockL: num($('#tkStock').value),
-      costRate: num($('#tkCost').value),
+      costRate: num($('#tkCost').value), isBowser: $('#tkBowser').checked,
       active:true, createdAt:new Date().toISOString(),
     });
     await logActivity({entity:'Tank', entityLabel:name, action:'add', summary: num($('#tkCost').value)?`Opening stock ${liters($('#tkStock').value)} at ${money($('#tkCost').value)}/L`:''});
