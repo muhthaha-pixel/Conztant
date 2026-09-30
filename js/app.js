@@ -3205,7 +3205,9 @@ function ledgerAccountList(){
 // synthetic Sales / Purchases accounts so each real account's statement balances.
 function buildLedgerPostings(r){
   const p = [];
-  const add = (key, date, particulars, dr, cr, ref)=>{ if (key && (num(dr)||num(cr))) p.push({key, date, particulars, dr:num(dr), cr:num(cr), ref:ref||''}); };
+  // `plain` is the same line with the station's own staff and account names left out — what a
+  // customer's copy of the statement shows. It defaults to the full particulars.
+  const add = (key, date, particulars, dr, cr, ref, plain)=>{ if (key && (num(dr)||num(cr))) p.push({key, date, particulars, dr:num(dr), cr:num(cr), ref:ref||'', plain: plain || particulars}); };
   r.duties.forEach(d=>{
     const who = `Duty — ${d.staffName}`;
     const ci = d.cashInfo || dutyCashInfo(d);
@@ -3213,7 +3215,7 @@ function buildLedgerPostings(r){
     if (num(d.pay.pos)+num(d.pay.upi) && d.pay.bankAccountId) add('acct:'+d.pay.bankAccountId, d.date, who+' (POS + UPI)', num(d.pay.pos)+num(d.pay.upi), 0);
     if (num(d.pay.hpCard)){ const k = hpCardTargetKey(); if (k) add(k, d.date, who+' (HP Card)', d.pay.hpCard, 0); }
   });
-  r.creditSales.forEach(c=>{ if (c.creditorId) add('cred:'+c.creditorId, c.date, `Credit sale — ${c.staffName}${c.vehicleNo?' · '+c.vehicleNo:''}`, c.amount, 0, c.indentNo||''); });
+  r.creditSales.forEach(c=>{ if (c.creditorId) add('cred:'+c.creditorId, c.date, `Credit sale — ${c.staffName}${c.vehicleNo?' · '+c.vehicleNo:''}`, c.amount, 0, c.indentNo||'', `Credit sale${c.vehicleNo?' — '+c.vehicleNo:''}`); });
   r.purchases.forEach(it=>{
     const who = `Fuel purchase — ${it.tankName||''}`;
     if (!it.payFrom || it.payFrom==='credit'){ if (it.supplierId) add('sup:'+it.supplierId, it.date, who, 0, it.amount, it.ref||''); }
@@ -3222,15 +3224,17 @@ function buildLedgerPostings(r){
   r.expenses.concat(r.payments).forEach(it=>{
     const who = expenseKind(it)==='payment' ? `Payment — ${[it.party, it.item].filter(Boolean).join(' · ')}` : `Expense — ${it.category||''}`;
     const label = who + (it.description?' · '+it.description:'');
-    if (it.paidFrom) add(it.paidFrom, it.date, label, 0, it.amount);
+    const plain = (expenseKind(it)==='payment' ? 'Payment' : 'Expense') + (it.description?' — '+it.description:'');
+    if (it.paidFrom) add(it.paidFrom, it.date, label, 0, it.amount, '', plain);
     // Payments debit the account they settle; a duty till payment does the same through its ledger.
-    if (it.ledger && (expenseKind(it)==='payment' || it.source==='duty')) add(it.ledger, it.date, label, it.amount, 0);
+    if (it.ledger && (expenseKind(it)==='payment' || it.source==='duty')) add(it.ledger, it.date, label, it.amount, 0, '', plain);
   });
   r.receipts.forEach(it=>{
     const label = `Receipt — ${receiptFromLabel(it)}${it.narration?' · '+it.narration:''}`;
-    add(it.into||'cash', it.date, label, it.amount, 0, it.reference||'');
-    if (it.type==='creditor' && it.creditorId) add('cred:'+it.creditorId, it.date, label, 0, it.amount, it.reference||'');
-    else if (it.ledger) add(it.ledger, it.date, label, 0, it.amount, it.reference||'');
+    const plain = `Receipt${it.mode?' — '+it.mode:''}${it.narration?' — '+it.narration:''}`;
+    add(it.into||'cash', it.date, label, it.amount, 0, it.reference||'', plain);
+    if (it.type==='creditor' && it.creditorId) add('cred:'+it.creditorId, it.date, label, 0, it.amount, it.reference||'', plain);
+    else if (it.ledger) add(it.ledger, it.date, label, 0, it.amount, it.reference||'', plain);
   });
   // Deposits and settlements entered straight onto an account (Setup → Accounts → Add deposit /
   // Record settlement) move its balance without going through any of the sources above. Entries
@@ -3254,8 +3258,11 @@ function buildLedgerPostings(r){
   });
   r.journal.forEach(it=>{
     const label = it.narration || `${targetLabel(it.debit)||it.debitLabel||''} / ${targetLabel(it.credit)||it.creditLabel||''}`;
-    add(it.debit, it.date, 'Journal — '+label, it.amount, 0);
-    add(it.credit, it.date, 'Journal — '+label, 0, it.amount);
+    // Without a narration the label is built from the two account names, which name the other side
+    // of the entry — not something a customer's statement should carry.
+    const plain = it.narration ? 'Adjustment — '+it.narration : 'Adjustment';
+    add(it.debit, it.date, 'Journal — '+label, it.amount, 0, '', plain);
+    add(it.credit, it.date, 'Journal — '+label, 0, it.amount, '', plain);
   });
   p.sort((a,b)=>a.date.localeCompare(b.date));
   return p;
@@ -3940,7 +3947,7 @@ function renderReportBody(body, cfg, r, c){
       list.forEach(a=>{
         // The running column starts at the opening balance, so the last row is the closing balance.
         let run = num(a.opening);
-        const rows = a.rows.map(x=>{ run += x.dr - x.cr; return [fmtDateLabel(x.date), esc(x.particulars), esc(x.ref||'—'), x.dr?money(x.dr):'—', x.cr?money(x.cr):'—', ledgerBalanceLabel(run)]; });
+        const rows = a.rows.map(x=>{ run += x.dr - x.cr; return [fmtDateLabel(x.date), esc(isCust ? (x.plain||x.particulars) : x.particulars), esc(x.ref||'—'), x.dr?money(x.dr):'—', x.cr?money(x.cr):'—', ledgerBalanceLabel(run)]; });
         parts.push(`<div class="card card-pad" style="margin-bottom:12px;">
           <div class="row" style="justify-content:space-between;margin-bottom:8px;">
             <strong>${esc(isCust ? a.label.replace(/ \(Creditor\)$/, '') : a.label)}</strong>
@@ -4161,12 +4168,13 @@ function exportReportExcel(rep){
   ], [24, 14, 16, 16, 16, 16, 30]);
   if (has('ledger')){
     const stmts = ledgerStatements(r, reportLedgerPick(cfg));
+    const isCust = cfg.report==='custtxn';
     const groupLabel = (k)=>(ledgerGroupKeys().find(g=>g.key===k)||{}).label||k;
     const rows = [['Group', 'Account', 'Date', 'Particulars', 'Ref', 'Debit (₹)', 'Credit (₹)', 'Balance (₹)']];
     stmts.forEach(a=>{
       let run = num(a.opening);
       rows.push([groupLabel(a.group), a.label, r.from, 'OPENING BALANCE', '', '', '', r2(run)]);
-      a.rows.forEach(x=>{ run += x.dr - x.cr; rows.push([groupLabel(a.group), a.label, x.date, x.particulars, x.ref||'', r2(x.dr), r2(x.cr), r2(run)]); });
+      a.rows.forEach(x=>{ run += x.dr - x.cr; rows.push([groupLabel(a.group), a.label, x.date, isCust ? (x.plain||x.particulars) : x.particulars, x.ref||'', r2(x.dr), r2(x.cr), r2(run)]); });
       rows.push([groupLabel(a.group), a.label, r.to, 'CLOSING BALANCE', '', r2(a.dr), r2(a.cr), r2(a.closing)], []);
     });
     addSheet('Ledger', rows, [22, 26, 12, 40, 14, 14, 14, 16]);
