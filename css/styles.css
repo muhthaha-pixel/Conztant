@@ -150,6 +150,9 @@
   .empty{padding:28px 16px;text-align:center;color:var(--text-faint);font-size:13.5px;}
   .banner{display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border-radius:var(--radius-sm);background:var(--warning-tint);color:var(--warning);font-size:13px;margin-bottom:16px;}
   .banner.info{background:var(--brand-tint);color:var(--brand-strong);}
+  /* The icon carries no intrinsic size, so without this it falls back to 300x150 and leaves a
+     block of empty space beside the text — most visible when printing. */
+  .banner svg{width:18px;height:18px;stroke:currentColor;flex-shrink:0;margin-top:1px;}
   .subtabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;}
   .subtabs button{padding:7px 13px;border-radius:8px;border:1px solid var(--border);background:var(--surface);font-size:12.5px;font-weight:600;color:var(--text-muted);cursor:pointer;}
   .subtabs button.active{background:var(--text);color:var(--bg);border-color:var(--text);}

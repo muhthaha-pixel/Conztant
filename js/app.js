@@ -3924,23 +3924,26 @@ function renderReportBody(body, cfg, r, c){
     const groups = {};
     stmts.forEach(s=>{ (groups[s.group] = groups[s.group]||[]).push(s); });
     const groupLabel = (k)=>(ledgerGroupKeys().find(g=>g.key===k)||{}).label||k;
+    // A customer statement is meant to be handed to that customer: the explanation of how to read a
+    // ledger, the cross-account group summary and the accounting group headings are all internal,
+    // so this report is the statements alone.
     const isCust = cfg.report==='custtxn';
-    parts.push(`<div class="section-head"><h2>${isCust?'Customer transactions':'Ledger statements'}</h2><span class="hint">${stmts.length} ${isCust?'customer':'account'}${stmts.length===1?'':'s'} · period transactions with running total</span></div>
-      <div class="banner info">${icon('book')}<div>${isCust?'Every credit sale, receipt and journal entry against each customer between the dates you picked. ':''}Each statement opens with the balance brought forward, lists the period's transactions with a running total, and closes with the balance at the period end — today's balance is also shown when it has moved since. Dr = value received by the account, Cr = value given.</div></div>`);
+    parts.push(`<div class="section-head"><h2>${isCust?'Customer transactions':'Ledger statements'}</h2><span class="hint">${stmts.length} ${isCust?'customer':'account'}${stmts.length===1?'':'s'} · period transactions with running total</span></div>`);
+    if (!isCust) parts.push(`<div class="banner info">${icon('book')}<div>Each statement opens with the balance brought forward, lists the period's transactions with a running total, and closes with the balance at the period end — today's balance is also shown when it has moved since. Dr = value received by the account, Cr = value given.</div></div>`);
     // Group summary first, then a statement per account.
     const sum = (list, k)=>list.reduce((s,x)=>s+num(x[k]),0);
-    parts.push(table('Group summary', [{label:'Group'},{label:'Accounts',num:true},{label:'Opening',num:true},{label:'Debits',num:true},{label:'Credits',num:true},{label:'Net movement',num:true},{label:'Closing',num:true}],
+    if (!isCust) parts.push(table('Group summary', [{label:'Group'},{label:'Accounts',num:true},{label:'Opening',num:true},{label:'Debits',num:true},{label:'Credits',num:true},{label:'Net movement',num:true},{label:'Closing',num:true}],
       Object.entries(groups).map(([g,list])=>[esc(groupLabel(g)), list.length, ledgerBalanceLabel(sum(list,'opening')), money(sum(list,'dr')), money(sum(list,'cr')), money(sum(list,'movement')), ledgerBalanceLabel(sum(list,'closing'))]),
       ['Total', stmts.length, ledgerBalanceLabel(sum(stmts,'opening')), money(sum(stmts,'dr')), money(sum(stmts,'cr')), money(sum(stmts,'movement')), ledgerBalanceLabel(sum(stmts,'closing'))]));
     Object.entries(groups).forEach(([g,list])=>{
-      parts.push(`<div class="section-head"><h2 style="font-size:14px;">${esc(groupLabel(g))}</h2></div>`);
+      if (!isCust) parts.push(`<div class="section-head"><h2 style="font-size:14px;">${esc(groupLabel(g))}</h2></div>`);
       list.forEach(a=>{
         // The running column starts at the opening balance, so the last row is the closing balance.
         let run = num(a.opening);
         const rows = a.rows.map(x=>{ run += x.dr - x.cr; return [fmtDateLabel(x.date), esc(x.particulars), esc(x.ref||'—'), x.dr?money(x.dr):'—', x.cr?money(x.cr):'—', ledgerBalanceLabel(run)]; });
         parts.push(`<div class="card card-pad" style="margin-bottom:12px;">
           <div class="row" style="justify-content:space-between;margin-bottom:8px;">
-            <strong>${esc(a.label)}</strong>
+            <strong>${esc(isCust ? a.label.replace(/ \(Creditor\)$/, '') : a.label)}</strong>
             <span class="hint" style="color:var(--text-muted);font-size:12.5px;">Opening <strong class="mono">${ledgerBalanceLabel(a.opening)}</strong> · Closing <strong class="mono">${ledgerBalanceLabel(a.closing)}</strong>${num(a.balance)!==num(a.closing)?` · Today <strong class="mono">${ledgerBalanceLabel(a.balance)}</strong>`:''}</span>
           </div>
           <div class="table-wrap"><table>
