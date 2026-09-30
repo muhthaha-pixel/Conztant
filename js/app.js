@@ -3928,7 +3928,7 @@ function renderReportBody(body, cfg, r, c){
     // ledger, the cross-account group summary and the accounting group headings are all internal,
     // so this report is the statements alone.
     const isCust = cfg.report==='custtxn';
-    parts.push(`<div class="section-head"><h2>${isCust?'Customer transactions':'Ledger statements'}</h2><span class="hint">${stmts.length} ${isCust?'customer':'account'}${stmts.length===1?'':'s'} · period transactions with running total</span></div>`);
+    parts.push(`<div class="section-head"><h2>${isCust?'Customer transactions':'Ledger statements'}</h2><span class="hint">${stmts.length} ${isCust?'customer':'account'}${stmts.length===1?'':'s'} · period transactions with a running balance</span></div>`);
     if (!isCust) parts.push(`<div class="banner info">${icon('book')}<div>Each statement opens with the balance brought forward, lists the period's transactions with a running total, and closes with the balance at the period end — today's balance is also shown when it has moved since. Dr = value received by the account, Cr = value given.</div></div>`);
     // Group summary first, then a statement per account.
     const sum = (list, k)=>list.reduce((s,x)=>s+num(x[k]),0);
@@ -3944,10 +3944,10 @@ function renderReportBody(body, cfg, r, c){
         parts.push(`<div class="card card-pad" style="margin-bottom:12px;">
           <div class="row" style="justify-content:space-between;margin-bottom:8px;">
             <strong>${esc(isCust ? a.label.replace(/ \(Creditor\)$/, '') : a.label)}</strong>
-            <span class="hint" style="color:var(--text-muted);font-size:12.5px;">Opening <strong class="mono">${ledgerBalanceLabel(a.opening)}</strong> · Closing <strong class="mono">${ledgerBalanceLabel(a.closing)}</strong>${num(a.balance)!==num(a.closing)?` · Today <strong class="mono">${ledgerBalanceLabel(a.balance)}</strong>`:''}</span>
+            <span class="hint" style="color:var(--text-muted);font-size:12.5px;">Opening <strong class="mono">${ledgerBalanceLabel(a.opening)}</strong> · Closing <strong class="mono">${ledgerBalanceLabel(a.closing)}</strong>${!isCust && num(a.balance)!==num(a.closing)?` · Today <strong class="mono">${ledgerBalanceLabel(a.balance)}</strong>`:''}</span>
           </div>
           <div class="table-wrap"><table>
-            <thead><tr><th>Date</th><th>Particulars</th><th>Ref</th><th class="num">Debit</th><th class="num">Credit</th><th class="num">Running</th></tr></thead>
+            <thead><tr><th>Date</th><th>Particulars</th><th>Ref</th><th class="num">Debit</th><th class="num">Credit</th><th class="num">Balance</th></tr></thead>
             <tbody>
               <tr><td colspan="3" style="font-style:italic;color:var(--text-muted);">Opening balance — ${esc(fmtDateLabel(r.from))}${a.openingDate && r.from < a.openingDate ? ` <span class="pill warning" title="This period starts before the balance you confirmed, so the opening is worked back from today rather than from a figure you verified">derived</span>` : ''}</td><td class="num">—</td><td class="num">—</td><td class="num">${ledgerBalanceLabel(a.opening)}</td></tr>
               ${rows.length? rows.map(row=>`<tr>${row.map((v,i)=>`<td class="${i>=3?'num':''}">${v}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="6" class="empty">No transactions in this period.</td></tr>`}
@@ -3955,7 +3955,7 @@ function renderReportBody(body, cfg, r, c){
             <tfoot><tr><td colspan="3" style="font-weight:700;">Closing balance</td><td class="num" style="font-weight:700;">${money(a.dr)}</td><td class="num" style="font-weight:700;">${money(a.cr)}</td><td class="num" style="font-weight:700;">${ledgerBalanceLabel(a.closing)}</td></tr></tfoot>
           </table></div>
           ${a.openingDate && r.from < a.openingDate ? `<div class="hint" style="color:var(--warning);font-size:12px;margin-top:8px;">This period starts before ${esc(fmtDateLabel(a.openingDate))}, the date your confirmed balance of <strong>${money(a.openingBalance)}</strong> applies to. Anything that happened before your records begin is rolled into the opening figure above, so it will not match a bank statement. Run the report from ${esc(fmtDateLabel(a.openingDate))} for figures that tie out.</div>` : ''}
-          ${a.anchored ? `<div class="hint" style="font-size:12px;margin-top:8px;color:${Math.abs(num(a.closing)-num(a.balance))<0.5?'var(--text-faint)':'var(--warning)'};">Built forward from your confirmed balance of <strong>${money(a.openingBalance)}</strong> on ${esc(fmtDateLabel(a.openingDate))}.${Math.abs(num(a.closing)-num(a.balance))<0.5 ? ' It agrees with the running balance the app holds.' : ` The app's live balance is <strong>${money(a.balance)}</strong> — a difference of <strong>${money(num(a.balance)-num(a.closing))}</strong>, which usually means something was recorded without a date in this range, or the live balance was corrected by hand.`}</div>` : ''}
+          ${a.anchored && !isCust ? `<div class="hint" style="font-size:12px;margin-top:8px;color:${Math.abs(num(a.closing)-num(a.balance))<0.5?'var(--text-faint)':'var(--warning)'};">Built forward from your confirmed balance of <strong>${money(a.openingBalance)}</strong> on ${esc(fmtDateLabel(a.openingDate))}.${Math.abs(num(a.closing)-num(a.balance))<0.5 ? ' It agrees with the running balance the app holds.' : ` The app's live balance is <strong>${money(a.balance)}</strong> — a difference of <strong>${money(num(a.balance)-num(a.closing))}</strong>, which usually means something was recorded without a date in this range, or the live balance was corrected by hand.`}</div>` : ''}
         </div>`);
       });
     });
@@ -4162,7 +4162,7 @@ function exportReportExcel(rep){
   if (has('ledger')){
     const stmts = ledgerStatements(r, reportLedgerPick(cfg));
     const groupLabel = (k)=>(ledgerGroupKeys().find(g=>g.key===k)||{}).label||k;
-    const rows = [['Group', 'Account', 'Date', 'Particulars', 'Ref', 'Debit (₹)', 'Credit (₹)', 'Running (₹)']];
+    const rows = [['Group', 'Account', 'Date', 'Particulars', 'Ref', 'Debit (₹)', 'Credit (₹)', 'Balance (₹)']];
     stmts.forEach(a=>{
       let run = num(a.opening);
       rows.push([groupLabel(a.group), a.label, r.from, 'OPENING BALANCE', '', '', '', r2(run)]);

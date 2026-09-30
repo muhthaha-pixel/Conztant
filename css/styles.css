@@ -201,7 +201,10 @@
     body{background:#fff;font-size:11pt;}
     .print-only{display:block;}
     /* Chrome, the menu, the report controls and every button are screen furniture. */
-    header.top, .side, nav.tabs, .no-print, .btn, footer.note, #modalRoot{display:none !important;}
+    /* The printed page carries its own heading block, so the screen's page title and standing
+       instructions would only repeat it. */
+    header.top, .side, nav.tabs, .no-print, .btn, footer.note, #modalRoot,
+    .page-title, .page-sub{display:none !important;}
     .app{max-width:none;padding:0;}
     .shell{display:block;}
     .main{padding:0;}
