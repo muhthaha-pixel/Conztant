@@ -2982,6 +2982,7 @@ const REPORT_TYPES = [
   {id:'sales',    label:'Sales & duties', sections:['summary','duties','products','trend','oils','collections']},
   {id:'stock',    label:'Stock & purchases', sections:['stock','purchases','suppliers']},
   {id:'creditors', label:'Creditors — balances & dues', sections:['creditors','credit','receipts']},
+  {id:'custtxn',  label:'Customer transactions — statement only', sections:['ledger']},
   {id:'credit',   label:'Credit sales & receipts', sections:['credit','receipts']},
   {id:'expense',  label:'Payments & expenses', sections:['expenses','payments']},
   {id:'salary',   label:'Salary', sections:['salary']},
@@ -2989,6 +2990,15 @@ const REPORT_TYPES = [
   {id:'ledger',   label:'Ledger statements', sections:['ledger']},
   {id:'balances', label:'Balances', sections:['balances','suppliers']},
 ];
+// Both creditor reports narrow to one customer, so both offer the picker.
+function creditorPickApplies(cfg){ return cfg.report==='creditors' || cfg.report==='custtxn'; }
+// Which account the ledger section of a report covers: one named customer, every customer, or
+// whatever the Ledger report's own picker says.
+function reportLedgerPick(cfg){
+  if (cfg.report==='custtxn') return cfg.creditor ? 'cred:'+cfg.creditor : 'grp:creditors';
+  if (cfg.report==='creditors' && cfg.creditor) return 'cred:'+cfg.creditor;
+  return cfg.ledgerPick || 'all';
+}
 function reportSections(cfg){
   const t = REPORT_TYPES.find(x=>x.id===cfg.report) || REPORT_TYPES[0];
   // Asking for one creditor is really asking for their account, so their statement comes with it.
@@ -3471,7 +3481,7 @@ async function renderReports(mount){
           ${ledgerGroupKeys().map(g=>`<option value="grp:${g.key}" ${cfg.ledgerPick==='grp:'+g.key?'selected':''}>Group — ${esc(g.label)}</option>`).join('')}
           ${ledgerAccountList().map(a=>`<option value="${esc(a.key)}" ${cfg.ledgerPick===a.key?'selected':''}>${esc(a.label)}</option>`).join('')}
         </select></div>
-        <div class="field" id="rpCreditorWrap" style="grid-column:span 2;display:${cfg.report==='creditors'?'':'none'};"><label>Creditor</label><select id="rpCreditorPick">
+        <div class="field" id="rpCreditorWrap" style="grid-column:span 2;display:${creditorPickApplies(cfg)?'':'none'};"><label>Creditor</label><select id="rpCreditorPick">
           <option value="">All creditors</option>
           ${byName(state.creditors).map(c=>`<option value="${c.id}" ${cfg.creditor===c.id?'selected':''}>${esc(c.name)}${c.isBowser?' (Bowser)':''} — ${money(c.balance||0)} due</option>`).join('')}
         </select></div>
@@ -3510,7 +3520,7 @@ async function renderReports(mount){
   const syncReport = ()=>{
     cfg.report = $('#rpReport').value;
     $('#rpLedgerWrap').style.display = cfg.report==='ledger' ? '' : 'none';
-    $('#rpCreditorWrap').style.display = cfg.report==='creditors' ? '' : 'none';
+    $('#rpCreditorWrap').style.display = creditorPickApplies(cfg) ? '' : 'none';
     const ids = reportSections(cfg);
     $('#rpIncludes').textContent = 'Includes: ' + ids.map(id=>(REPORT_SECTIONS.find(s=>s.id===id)||{}).label).filter(Boolean).join(' · ');
   };
@@ -3906,13 +3916,17 @@ function renderReportBody(body, cfg, r, c){
       ['Total','', money(t('opening')), money(Object.values(purchasedBySup).reduce((a,b)=>a+b,0)), money(Object.values(paidBySup).reduce((a,b)=>a+b,0)), money(t('closing'))]));
   }
   if (has('ledger')){
-    const pick = (cfg.report==='creditors' && cfg.creditor) ? 'cred:'+cfg.creditor : (cfg.ledgerPick || 'all');
-    const stmts = ledgerStatements(r, pick);
+    const pick = reportLedgerPick(cfg);
+    // Asked for the period's transactions, a customer who had none is noise — unless they are the
+    // one customer the report was run for, where an empty statement is itself the answer.
+    const txnOnly = cfg.report==='custtxn' && !cfg.creditor;
+    const stmts = ledgerStatements(r, pick).filter(a=>txnOnly ? a.rows.length : true);
     const groups = {};
     stmts.forEach(s=>{ (groups[s.group] = groups[s.group]||[]).push(s); });
     const groupLabel = (k)=>(ledgerGroupKeys().find(g=>g.key===k)||{}).label||k;
-    parts.push(`<div class="section-head"><h2>Ledger statements</h2><span class="hint">${stmts.length} account${stmts.length===1?'':'s'} · period transactions with running total</span></div>
-      <div class="banner info">${icon('book')}<div>Each statement opens with the balance brought forward, lists the period's transactions with a running total, and closes with the balance at the period end — today's balance is also shown when it has moved since. Dr = value received by the account, Cr = value given.</div></div>`);
+    const isCust = cfg.report==='custtxn';
+    parts.push(`<div class="section-head"><h2>${isCust?'Customer transactions':'Ledger statements'}</h2><span class="hint">${stmts.length} ${isCust?'customer':'account'}${stmts.length===1?'':'s'} · period transactions with running total</span></div>
+      <div class="banner info">${icon('book')}<div>${isCust?'Every credit sale, receipt and journal entry against each customer between the dates you picked. ':''}Each statement opens with the balance brought forward, lists the period's transactions with a running total, and closes with the balance at the period end — today's balance is also shown when it has moved since. Dr = value received by the account, Cr = value given.</div></div>`);
     // Group summary first, then a statement per account.
     const sum = (list, k)=>list.reduce((s,x)=>s+num(x[k]),0);
     parts.push(table('Group summary', [{label:'Group'},{label:'Accounts',num:true},{label:'Opening',num:true},{label:'Debits',num:true},{label:'Credits',num:true},{label:'Net movement',num:true},{label:'Closing',num:true}],
@@ -4143,7 +4157,7 @@ function exportReportExcel(rep){
     }),
   ], [24, 14, 16, 16, 16, 16, 30]);
   if (has('ledger')){
-    const stmts = ledgerStatements(r, cfg.ledgerPick||'all');
+    const stmts = ledgerStatements(r, reportLedgerPick(cfg));
     const groupLabel = (k)=>(ledgerGroupKeys().find(g=>g.key===k)||{}).label||k;
     const rows = [['Group', 'Account', 'Date', 'Particulars', 'Ref', 'Debit (₹)', 'Credit (₹)', 'Running (₹)']];
     stmts.forEach(a=>{
