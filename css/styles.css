@@ -208,7 +208,10 @@
     .app{max-width:none;padding:0;}
     .shell{display:block;}
     .main{padding:0;}
-    .card{box-shadow:none;border:1px solid var(--border);break-inside:avoid;}
+    /* Nothing is held back to keep it whole on one sheet: a card or a heading that would not fit
+       used to jump to the next page and leave the rest of the current one empty. Content runs on
+       and the page fills; only the column headers repeat, so a split table stays readable. */
+    .card{box-shadow:none;border:1px solid var(--border);}
     .kpi{border-top:2px solid #000;}
     .grid-kpi{grid-template-columns:repeat(4,1fr);}
     .table-wrap{overflow:visible;}
@@ -220,7 +223,6 @@
     thead{display:table-header-group;}
     tfoot{display:table-row-group;}
     tr{break-inside:avoid;}
-    .section-head{break-after:avoid;}
     .pill{border:1px solid var(--border);}
     .banner{border:1px solid var(--border);}
   }
