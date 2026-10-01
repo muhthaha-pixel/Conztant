@@ -68,13 +68,18 @@ failure for a step you have not set up yet.
 
 ### By hand from this PC
 
-The CLI needs no Node install — download the standalone Windows build:
+The CLI needs no Node install — the standalone Windows build is one self-contained `.exe`, about
+250 MB, so the download takes a few minutes:
 
 ```powershell
-Invoke-WebRequest https://firebase.tools/bin/win/instant/latest -OutFile firebase.exe
+Invoke-WebRequest https://github.com/firebase/firebase-tools/releases/latest/download/firebase-tools-win.exe -OutFile firebase.exe
 .\firebase.exe login
 .\firebase.exe deploy --only hosting
 ```
+
+`login` opens a browser to sign in with the Google account that owns the Firebase project. Use
+`firebase-tools-win.exe`, not the `-instant-` one beside it on the releases page: that variant opens
+its own shell instead of running the command you give it.
 
 `firebase.exe` is already in `.gitignore`. Drop `--only hosting` and it also publishes
 `firestore.rules`, which is useful when you have edited them here, and a no-op when you have not.
