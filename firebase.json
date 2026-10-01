@@ -8,8 +8,11 @@
       "serve.ps1",
       "README.md",
       "**/.*",
+      "**/.*/**",
+      ".git/**",
       ".github/**",
       ".claude/**",
+      "firebase.exe",
       "**/node_modules/**"
     ],
     "headers": [
