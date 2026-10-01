@@ -3205,6 +3205,21 @@ function ledgerAccountList(){
 // Turns everything recorded in the period into double-entry postings: {key, date, particulars, dr, cr}.
 // dr is positive for a debit, cr positive for a credit. Fuel sales and purchases post against
 // synthetic Sales / Purchases accounts so each real account's statement balances.
+// The readable name of wherever money sits — Cash in hand or one of the bank accounts.
+function moneyAccountLabel(key){
+  return key==='cash' ? 'Cash in hand' : ((state.accounts.find(a=>'acct:'+a.id===key)||{}).name || '');
+}
+function isMoneyAccount(key){ return key==='cash' || String(key||'').startsWith('acct:'); }
+// Money also arrives in cash or a bank through a journal entry — a deposit, a transfer between
+// accounts, a charge reversed. None of that is written in the Receipts book, but it is money in,
+// and a day's collections never tie out while it is missing. The other side of the entry is what
+// the money came from.
+function journalReceiptRows(r){
+  return (r.journal||[]).filter(it=>isMoneyAccount(it.debit) && num(it.amount)).map(it=>({
+    date: it.date, amount: num(it.amount), into: it.debit, mode: 'Journal',
+    from: targetLabel(it.credit) || it.creditLabel || '—', narration: it.narration || '',
+  }));
+}
 function buildLedgerPostings(r){
   const p = [];
   // `plain` is the same line with the station's own staff and account names left out — what a
@@ -3882,9 +3897,15 @@ function renderReportBody(body, cfg, r, c){
   }
   if (has('receipts')){
     const rows = r.receipts.slice().sort(sortD);
+    const jrows = journalReceiptRows(r).slice().sort(sortD);
+    const recTotal = rows.reduce((s,i)=>s+num(i.amount),0);
+    const jTotal = jrows.reduce((s,i)=>s+num(i.amount),0);
+    const all = rows.map(it=>({date:it.date, html:[fmtDateLabel(it.date), esc(receiptFromLabel(it)), it.type==='creditor'?'Creditor':'Other', money(it.amount), esc(moneyAccountLabel(it.into)), esc(it.mode||''), esc([it.reference,it.narration].filter(Boolean).join(' · ')||'—')]}))
+      .concat(jrows.map(it=>({date:it.date, html:[fmtDateLabel(it.date), esc(it.from), 'Journal', money(it.amount), esc(moneyAccountLabel(it.into)), esc(it.mode), esc(it.narration||'—')]})))
+      .sort(sortD).map(x=>x.html);
     parts.push(table('Receipts', [{label:'Date'},{label:'From'},{label:'Type'},{label:'Amount',num:true},{label:'Into'},{label:'Mode'},{label:'Reference / narration'}],
-      rows.map(it=>[fmtDateLabel(it.date), esc(receiptFromLabel(it)), it.type==='creditor'?'Creditor':'Other', money(it.amount), esc(it.into==='cash'?'Cash in hand':((state.accounts.find(a=>'acct:'+a.id===it.into)||{}).name||'')), esc(it.mode||''), esc([it.reference,it.narration].filter(Boolean).join(' · ')||'—')]),
-      ['Total','','', money(rows.reduce((s,i)=>s+num(i.amount),0)), '','','']));
+      all,
+      [jTotal ? `Total — receipts ${money(recTotal)} + journal ${money(jTotal)}` : 'Total','','', money(recTotal+jTotal), '','','']));
   }
   if (has('stock')){
     parts.push(`<div class="section-head"><h2>Tank levels</h2><span class="hint">live, as of now</span></div>
@@ -4134,7 +4155,10 @@ function exportReportExcel(rep){
   if (has('payments')) addSheet('Payments', [['Date', 'Paid to', 'Payment for', 'Description', 'Mode', 'Paid from', 'Ledger', 'Amount (₹)'], ...r.payments.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, it.party||'', it.item||'', it.description||'', it.mode||'', paidFromLabel(it.paidFrom), targetLabel(it.ledger)||'', r2(it.amount)])], [12, 22, 20, 30, 12, 16, 22, 12]);
   if (has('salary')) addSheet('Salary', [['Month', 'Staff', 'Wage type', 'Hours', 'Base (₹)', 'Advance paid (₹)', 'Deduction (₹)', 'Cost to P&L (₹)', 'Still to pay (₹)', 'Status', 'Paid date'], ...r.salaryRows.map(s=>[s.month, s.name, s.wageType||'monthly', s.hoursWorked!=null?r2(s.hoursWorked):'', r2(s.baseSalary), r2(s.advance), r2(s.deduction), r2(Math.max(0,num(s.baseSalary)-num(s.deduction))), r2(s.netPaid), s.status||'', s.paidDate||''])], [10, 18, 10, 8, 12, 15, 13, 16, 15, 9, 12]);
   if (has('journal')) addSheet('Journal', [['Date', 'Debit (Dr)', 'Credit (Cr)', 'Amount (₹)', 'Narration', 'By'], ...r.journal.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, targetLabel(it.debit)||it.debitLabel||'', targetLabel(it.credit)||it.creditLabel||'', r2(it.amount), it.narration||'', it.by||''])], [12, 28, 28, 12, 36, 14]);
-  if (has('receipts')) addSheet('Receipts', [['Date', 'From', 'Type', 'Amount (₹)', 'Into', 'Mode', 'Reference', 'Narration', 'Ledger', 'By'], ...r.receipts.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(it=>[it.date, receiptFromLabel(it), it.type==='creditor'?'Creditor':'Other', r2(it.amount), it.into==='cash'?'Cash in hand':((state.accounts.find(a=>'acct:'+a.id===it.into)||{}).name||''), it.mode||'', it.reference||'', it.narration||'', targetLabel(it.ledger)||'', it.by||''])], [12, 24, 10, 12, 18, 12, 14, 30, 22, 14]);
+  if (has('receipts')) addSheet('Receipts', [['Date', 'From', 'Type', 'Amount (₹)', 'Into', 'Mode', 'Reference', 'Narration', 'Ledger', 'By'],
+    ...r.receipts.map(it=>[it.date, receiptFromLabel(it), it.type==='creditor'?'Creditor':'Other', r2(it.amount), moneyAccountLabel(it.into), it.mode||'', it.reference||'', it.narration||'', targetLabel(it.ledger)||'', it.by||''])
+      .concat(journalReceiptRows(r).map(it=>[it.date, it.from, 'Journal', r2(it.amount), moneyAccountLabel(it.into), it.mode, '', it.narration, '', '']))
+      .sort((a,b)=>String(a[0]).localeCompare(String(b[0])))], [12, 24, 10, 12, 18, 12, 14, 30, 22, 14]);
   if (has('stock')) addSheet('Oil stock', [
     ['Product', 'Unit', 'Quantity', 'Cost rate (₹)', 'Value (₹)', 'Selling rate (₹)'],
     ...((r.stockValue&&r.stockValue.oils)||[]).map(x=>[x.name, x.unit, r2(x.qty), r2(x.rate), r2(x.value), r2(x.saleRate)]),
