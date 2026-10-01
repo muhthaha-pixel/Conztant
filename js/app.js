@@ -5868,6 +5868,43 @@ function openResetPasswordModal(user){
   };
 }
 
+/* ============================== BALANCE AUDIT ==============================
+A stored balance is maintained a transaction at a time: each save, edit and delete nudges it. The
+statements, by contrast, are derived — opening balance plus everything recorded since. The two
+should agree, and when they don't it is the stored figure that has drifted: an edit that only half
+reversed, a save that failed after writing the day but before writing the balance, a figure typed
+over by hand. This finds those, and can write the derived figure back.
+Only an account whose opening balance has been confirmed can be checked, because without one there
+is nothing to build forward from. */
+function balanceTargetRef(key){
+  if (key==='cash'){ const c = state.ledgers.find(l=>l.cashInHand); return c ? {path:'ledgers/'+c.id, sign:1} : null; }
+  const [kind, id] = String(key).split(':');
+  if (kind==='led')  return {path:'ledgers/'+id,   sign:1};
+  if (kind==='acct') return {path:'accounts/'+id,  sign:1};
+  if (kind==='cred') return {path:'creditors/'+id, sign:1};
+  // A supplier's balance is held as what we still owe them, the opposite sign to the debit-positive
+  // figure the statements work in.
+  if (kind==='sup')  return {path:'suppliers/'+id, sign:-1};
+  return null;
+}
+// Returns one row per anchored account: what it holds, what its own history says it should hold.
+async function auditBalances(){
+  const accounts = ledgerAccountList().filter(a=>a.openingDate && a.openingBalance!=null);
+  if (!accounts.length) return {accounts:[], rows:[], from:''};
+  // One report over the whole span, sliced per account — an account at a time would mean one pass
+  // over the books each.
+  const from = accounts.map(a=>a.openingDate).sort()[0];
+  const postings = buildLedgerPostings(await computeReport(from, todayStr(), {}));
+  const rows = accounts.map(a=>{
+    const movement = postings.filter(x=>x.key===a.key && x.date>=a.openingDate)
+      .reduce((s,x)=>s + x.dr - x.cr, 0);
+    const derived = num(a.openingBalance) + movement;
+    return {key:a.key, label:a.label, openingDate:a.openingDate, opening:num(a.openingBalance),
+            movement, derived, stored:num(a.balance), gap: Math.round((num(a.balance)-derived)*100)/100};
+  });
+  return {accounts, rows, from};
+}
+
 function renderSetupTools(body){
   body.innerHTML = `
     <div class="card card-pad">
@@ -5883,6 +5920,13 @@ function renderSetupTools(body){
       <div id="toolCashMsg" style="font-size:13px;margin-top:8px;"></div>
     </div>
     <div class="card card-pad" style="margin-top:16px;">
+      <h3 style="margin-top:0;font-size:14px;">Check every balance</h3>
+      <p class="hint" style="color:var(--text-muted);font-size:13px;">Every account that has a <strong>confirmed opening balance</strong> is checked against its own history — the opening figure plus every transaction recorded against it since. Where the two disagree it is the stored balance that has drifted, usually an edit or a delete that only half reversed. This only reads; correcting what it finds is a second, separate button.</p>
+      <button class="btn" id="toolAudit" ${state.dbReady?'':'disabled'}>Check balances</button>
+      <button class="btn danger" id="toolAuditFix" style="display:none;">Rebuild the balances listed</button>
+      <div id="toolAuditMsg" style="font-size:13px;margin-top:8px;"></div>
+    </div>
+    <div class="card card-pad" style="margin-top:16px;">
       <h3 style="margin-top:0;font-size:14px;">Station name</h3>
       <div class="row">
         <input type="text" id="cfgName" value="${esc(state.config.stationName||'')}" style="max-width:320px;">
@@ -5894,6 +5938,54 @@ function renderSetupTools(body){
     await state.db.doc('config/main').update({stationName:$('#cfgName').value.trim()}).catch(async ()=>{
       await state.db.doc('config/main').set(Object.assign({}, state.config, {stationName:$('#cfgName').value.trim()}));
     });
+  };
+  // Check first, write second: the button only offers to correct what it has already shown you.
+  let auditFound = null;
+  const runAudit = async (apply)=>{
+    const msg = $('#toolAuditMsg');
+    msg.innerHTML = 'Checking every account against its own history…';
+    try{
+      const {rows, from} = await auditBalances();
+      if (!rows.length){
+        msg.innerHTML = `<span style="color:var(--text-muted)">No account has a confirmed opening balance yet, so there is nothing to check against. Set one from Setup → Ledgers, Accounts, Creditors or Suppliers (the <strong>Opening</strong> button).</span>`;
+        return;
+      }
+      const off = rows.filter(x=>Math.abs(x.gap)>=0.5);
+      if (!off.length){
+        msg.innerHTML = `<span style="color:var(--good)">All ${rows.length} account(s) with a confirmed opening balance agree with their own history, from ${esc(fmtDateLabel(from))} to today.</span>`;
+        auditFound = null;
+        $('#toolAuditFix').style.display = 'none';
+        return;
+      }
+      if (!apply){
+        auditFound = off;
+        msg.innerHTML = `<div style="color:var(--warning);margin-bottom:8px;">${off.length} of ${rows.length} account(s) hold a balance their own history does not support.</div>
+          <div class="table-wrap"><table><thead><tr><th>Account</th><th class="num">Holds</th><th class="num">History says</th><th class="num">Out by</th></tr></thead>
+          <tbody>${off.map(x=>`<tr><td>${esc(x.label)}</td><td class="num">${money(x.stored)}</td><td class="num">${money(x.derived)}</td><td class="num" style="color:var(--critical);font-weight:600;">${money(x.gap)}</td></tr>`).join('')}</tbody></table></div>
+          <div class="hint" style="color:var(--text-faint);font-size:12px;margin-top:6px;">Each "history says" figure is the confirmed opening balance plus every transaction recorded against the account since. A gap means a stored balance drifted — most often an edit or a delete that only half reversed.</div>`;
+        $('#toolAuditFix').style.display = '';
+        return;
+      }
+      let written = 0;
+      for (const x of (auditFound||off)){
+        const ref = balanceTargetRef(x.key);
+        if (!ref) continue;
+        await state.db.doc(ref.path).update({balance: ref.sign<0 ? -x.derived : x.derived});
+        await logActivity({entity:'Balance', entityLabel:x.label, action:'edit',
+          changes:[{field:'Balance', from:money(x.stored), to:money(x.derived)}], summary:'Rebuilt from recorded history'});
+        written++;
+      }
+      auditFound = null;
+      $('#toolAuditFix').style.display = 'none';
+      msg.innerHTML = `<span style="color:var(--good)">${written} balance(s) rebuilt from the recorded history. Run the check again to confirm.</span>`;
+    }catch(e){ msg.innerHTML = `<span style="color:var(--critical)">${esc(e.message||'Failed')}</span>`; }
+  };
+  $('#toolAudit').onclick = ()=>runAudit(false);
+  $('#toolAuditFix').onclick = async ()=>{
+    const ok = await confirmModal({title:'Rebuild these balances?',
+      body:'Each listed account will be set to its confirmed opening balance plus every transaction recorded against it since. Nothing else changes — no transaction is added, edited or removed. The old figures are kept in the Activity Log.',
+      confirmLabel:'Rebuild balances'});
+    if (ok) runAudit(true);
   };
   $('#toolRecalcCash').onclick = async ()=>{
     const msg = $('#toolCashMsg');
