@@ -5,6 +5,11 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Firebase CLI (only if you later use Firebase Hosting)
+# Firebase CLI
 .firebase/
 firebase-debug.log
+firebase.exe
+# A service account key grants deploy rights to the whole project. It belongs in a GitHub secret,
+# never in the repository.
+*-firebase-adminsdk-*.json
+serviceAccountKey.json

@@ -10,7 +10,10 @@ css/styles.css           theme (light + dark)
 js/app.js                the whole app
 js/firebase-config.js    your Firebase project keys  ← the only file you must edit
 firestore.rules          database access rules (paste into Firebase console)
-.github/workflows/       auto-deploys to GitHub Pages on every push to main
+firebase.json            Firebase Hosting settings — what to upload, cache headers
+.firebaserc              which Firebase project to deploy to
+.github/workflows/       auto-deploys on every push to main (GitHub Pages, and Firebase Hosting
+                         once its secret is set — see below)
 ```
 
 ## 1. Create the database (Firebase, free tier)
@@ -42,6 +45,55 @@ firestore.rules          database access rules (paste into Firebase console)
 5. Add that domain to Firebase Authorized domains (step 1.6 above).
 
 Every later `git push` to `main` redeploys within about a minute.
+
+## 2b. Firebase Hosting (optional second home)
+
+The same files can be served from Firebase Hosting, on the same project that already holds the
+database. You end up with `https://conztant-fuel-ledger.web.app`. Both sites read the same
+Firestore, so they show the same data; nothing has to be migrated.
+
+Pick one of the two routes.
+
+### Automatic, on every push — no software to install
+
+1. Firebase console → **Project settings → Service accounts → Generate new private key**. A `.json`
+   file downloads. It grants deploy rights to the project, so treat it as a password: never commit
+   it, and delete it from Downloads once step 2 is done.
+2. GitHub repo → **Settings → Secrets and variables → Actions → New repository secret**.
+   Name `FIREBASE_SERVICE_ACCOUNT`, value = the whole contents of that `.json` file.
+3. Push anything, or run **Actions → Deploy to Firebase Hosting → Run workflow**.
+
+Until that secret exists the workflow finishes green without deploying, so it never reports a
+failure for a step you have not set up yet.
+
+### By hand from this PC
+
+The CLI needs no Node install — download the standalone Windows build:
+
+```powershell
+Invoke-WebRequest https://firebase.tools/bin/win/instant/latest -OutFile firebase.exe
+.\firebase.exe login
+.\firebase.exe deploy --only hosting
+```
+
+`firebase.exe` is already in `.gitignore`. Drop `--only hosting` and it also publishes
+`firestore.rules`, which is useful when you have edited them here, and a no-op when you have not.
+
+### Then
+
+Firebase console → **Authentication → Settings → Authorized domains** → add
+`conztant-fuel-ledger.web.app`.
+
+### A note on caching
+
+`firebase.json` serves HTML, JS and CSS with `Cache-Control: no-cache`. There is no build step, so
+`app.js` keeps the same name from one release to the next; without this a browser could sit on an
+old copy for hours after a deploy. `no-cache` does not stop the browser caching — it only makes it
+ask whether its copy is still current, so a push is picked up on the next load. Images and fonts
+are cached for a week, since those do change name when they change.
+
+If you later want Firebase Hosting to be the only home, delete
+`.github/workflows/deploy.yml` and switch **Settings → Pages → Source** to *None*.
 
 ## 3. First run
 
