@@ -2987,7 +2987,9 @@ const REPORT_TYPES = [
   {id:'expense',  label:'Payments & expenses', sections:['expenses','payments']},
   {id:'salary',   label:'Salary', sections:['salary']},
   {id:'journal',  label:'Journal', sections:['journal']},
-  {id:'ledger',   label:'Ledger statements', sections:['ledger']},
+  // The statements show each receipt twice, once on either side of the entry. The Receipts table
+  // lists them once, with the mode and reference, which is what you check a day's takings against.
+  {id:'ledger',   label:'Ledger statements', sections:['receipts','ledger']},
   {id:'balances', label:'Balances', sections:['balances','suppliers']},
 ];
 // Both creditor reports narrow to one customer, so both offer the picker.
