@@ -1563,6 +1563,12 @@ async function saveDutyEntry(){
   for (const c of dutyForm.creditSales){
     if (num(c.amount)>0 && !c.creditorId){ msg.innerHTML = `<span style="color:var(--critical)">Pick a creditor for every credit sale line, or remove it.</span>`; return; }
   }
+  // Card and UPI takings are only money once they land somewhere. Without an account named they
+  // were counted as collected, taken out of the cash the shift owes, and added to no bank at all.
+  if (num(dutyForm.pos)+num(dutyForm.upi) > 0 && !dutyForm.bankAccountId){
+    msg.innerHTML = `<span style="color:var(--critical)">Choose the bank account the POS and UPI settle into — ${money(num(dutyForm.pos)+num(dutyForm.upi))} would otherwise reach no account at all.</span>`;
+    return;
+  }
   if (missingRate){ msg.innerHTML = `<span style="color:var(--warning)">Note: one or more products have no rate set for this date — saving with ₹0 for those. Set today's rate in Setup → Rates.</span>`; }
 
   $('#dfSave').disabled = true;
@@ -5902,7 +5908,15 @@ async function auditBalances(){
     return {key:a.key, label:a.label, openingDate:a.openingDate, opening:num(a.openingBalance),
             movement, derived, stored:num(a.balance), gap: Math.round((num(a.balance)-derived)*100)/100};
   });
-  return {accounts, rows, from};
+  return {accounts, rows, from, stranded: await strandedBankTakings(from)};
+}
+// A balance can tie out perfectly and still be wrong, when money was recorded as collected but
+// named no account to land in. A duty's card and UPI takings are deducted from the cash the shift
+// owes whether or not a bank account was chosen, so leaving it blank quietly loses them.
+async function strandedBankTakings(from){
+  const r = await computeReport(from, todayStr(), {});
+  return r.duties.filter(d=>num(d.pay.pos)+num(d.pay.upi) > 0 && !d.pay.bankAccountId)
+    .map(d=>({date:d.date, staffName:d.staffName, amount: num(d.pay.pos)+num(d.pay.upi)}));
 }
 
 function renderSetupTools(body){
@@ -5945,14 +5959,17 @@ function renderSetupTools(body){
     const msg = $('#toolAuditMsg');
     msg.innerHTML = 'Checking every account against its own history…';
     try{
-      const {rows, from} = await auditBalances();
+      const {rows, from, stranded} = await auditBalances();
+      const strandedNote = (stranded||[]).length
+        ? `<div class="banner" style="margin-top:10px;">${icon('alert')}<div><strong>${money(stranded.reduce((s,x)=>s+x.amount,0))}</strong> of card and UPI takings reached no bank account: ${stranded.map(x=>esc(fmtDateLabel(x.date)+' — '+x.staffName+', '+money(x.amount))).join('; ')}. The shift was credited with collecting it, so the cash it owed came down, but no bank balance went up. Open the duty and choose the account it settles into.</div></div>`
+        : '';
       if (!rows.length){
         msg.innerHTML = `<span style="color:var(--text-muted)">No account has a confirmed opening balance yet, so there is nothing to check against. Set one from Setup → Ledgers, Accounts, Creditors or Suppliers (the <strong>Opening</strong> button).</span>`;
         return;
       }
       const off = rows.filter(x=>Math.abs(x.gap)>=0.5);
       if (!off.length){
-        msg.innerHTML = `<span style="color:var(--good)">All ${rows.length} account(s) with a confirmed opening balance agree with their own history, from ${esc(fmtDateLabel(from))} to today.</span>`;
+        msg.innerHTML = `<span style="color:var(--good)">All ${rows.length} account(s) with a confirmed opening balance agree with their own history, from ${esc(fmtDateLabel(from))} to today.</span>` + strandedNote;
         auditFound = null;
         $('#toolAuditFix').style.display = 'none';
         return;
@@ -5962,7 +5979,7 @@ function renderSetupTools(body){
         msg.innerHTML = `<div style="color:var(--warning);margin-bottom:8px;">${off.length} of ${rows.length} account(s) hold a balance their own history does not support.</div>
           <div class="table-wrap"><table><thead><tr><th>Account</th><th class="num">Holds</th><th class="num">History says</th><th class="num">Out by</th></tr></thead>
           <tbody>${off.map(x=>`<tr><td>${esc(x.label)}</td><td class="num">${money(x.stored)}</td><td class="num">${money(x.derived)}</td><td class="num" style="color:var(--critical);font-weight:600;">${money(x.gap)}</td></tr>`).join('')}</tbody></table></div>
-          <div class="hint" style="color:var(--text-faint);font-size:12px;margin-top:6px;">Each "history says" figure is the confirmed opening balance plus every transaction recorded against the account since. A gap means a stored balance drifted — most often an edit or a delete that only half reversed.</div>`;
+          <div class="hint" style="color:var(--text-faint);font-size:12px;margin-top:6px;">Each "history says" figure is the confirmed opening balance plus every transaction recorded against the account since. A gap means a stored balance drifted — most often an edit or a delete that only half reversed.</div>` + strandedNote;
         $('#toolAuditFix').style.display = '';
         return;
       }
