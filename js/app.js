@@ -3598,6 +3598,17 @@ async function runReport(exportAfter){
   body.innerHTML = `<div class="card empty">Crunching the numbers…</div>`;
   const filters = {staff:cfg.staff, product:cfg.product, nozzle:cfg.nozzle, creditor:cfg.creditor, method:cfg.method, basis:cfg.basis};
   const main = await computeReport(cfg.from, cfg.to, filters);
+  // A filter narrows which transactions the report is about. An account's own statement is not a
+  // selection of transactions, though — it is that account's record, and leaving out the ones that
+  // belong to some other staff member or customer does not narrow it, it falsifies it: the receipts
+  // vanish from Cash in hand, and the opening balance is wound back through movement that was only
+  // half counted. So the statements are built from a second, unfiltered pass whenever a filter is on.
+  const narrowed = !!(cfg.staff || cfg.product || cfg.nozzle || cfg.creditor || cfg.method);
+  if (narrowed){
+    const full = await computeReport(cfg.from, cfg.to, {basis:cfg.basis});
+    full.periodBalances = await ledgerPeriodBalances(full);
+    main.unfiltered = full;
+  }
   // Opening / closing per account, used by the ledger, creditor and supplier sections.
   main.periodBalances = await ledgerPeriodBalances(main);
   const cmpRange = comparisonRange(cfg.from, cfg.to, cfg.compare);
@@ -3953,10 +3964,13 @@ function renderReportBody(body, cfg, r, c){
   }
   if (has('ledger')){
     const pick = reportLedgerPick(cfg);
+    // Statements come off the unfiltered pass — the picker above already chooses which accounts to
+    // show, so a filter here would only cut transactions out of the accounts it does show.
+    const lr = r.unfiltered || r;
     // Asked for the period's transactions, a customer who had none is noise — unless they are the
     // one customer the report was run for, where an empty statement is itself the answer.
     const txnOnly = cfg.report==='custtxn' && !cfg.creditor;
-    const stmts = ledgerStatements(r, pick).filter(a=>txnOnly ? a.rows.length : true);
+    const stmts = ledgerStatements(lr, pick).filter(a=>txnOnly ? a.rows.length : true);
     const groups = {};
     stmts.forEach(s=>{ (groups[s.group] = groups[s.group]||[]).push(s); });
     const groupLabel = (k)=>(ledgerGroupKeys().find(g=>g.key===k)||{}).label||k;
@@ -4199,7 +4213,7 @@ function exportReportExcel(rep){
     }),
   ], [24, 14, 16, 16, 16, 16, 30]);
   if (has('ledger')){
-    const stmts = ledgerStatements(r, reportLedgerPick(cfg));
+    const stmts = ledgerStatements(r.unfiltered || r, reportLedgerPick(cfg));
     const isCust = cfg.report==='custtxn';
     const groupLabel = (k)=>(ledgerGroupKeys().find(g=>g.key===k)||{}).label||k;
     const rows = [['Group', 'Account', 'Date', 'Particulars', 'Ref', 'Debit (₹)', 'Credit (₹)', 'Balance (₹)']];
