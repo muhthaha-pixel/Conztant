@@ -3825,34 +3825,41 @@ function renderReportBody(body, cfg, r, c){
   if (has('creditors')){
     // Movement in the period, per creditor. The closing figure is the live balance; the opening is
     // that balance wound back over this period's sales, receipts and journal postings.
+    // An account's balance is its own, whatever the report is filtered to, so these come off the
+    // unfiltered pass — the same one the statements use, or the table and the statement below it
+    // would quote different figures for the same customer.
+    const cr = r.unfiltered || r;
     const soldTo = {}, ltrTo = {}, recdFrom = {}, jnlTo = {};
-    r.creditSales.forEach(x=>{ if (x.creditorId){ soldTo[x.creditorId] = (soldTo[x.creditorId]||0) + num(x.amount); ltrTo[x.creditorId] = (ltrTo[x.creditorId]||0) + num(x.liters); } });
-    r.receipts.forEach(x=>{ if (x.type==='creditor' && x.creditorId) recdFrom[x.creditorId] = (recdFrom[x.creditorId]||0) + num(x.amount); });
-    r.journal.forEach(it=>{
+    cr.creditSales.forEach(x=>{ if (x.creditorId){ soldTo[x.creditorId] = (soldTo[x.creditorId]||0) + num(x.amount); ltrTo[x.creditorId] = (ltrTo[x.creditorId]||0) + num(x.liters); } });
+    cr.receipts.forEach(x=>{ if (x.type==='creditor' && x.creditorId) recdFrom[x.creditorId] = (recdFrom[x.creditorId]||0) + num(x.amount); });
+    cr.journal.forEach(it=>{
       if ((it.debit||'').startsWith('cred:')) jnlTo[it.debit.slice(5)] = (jnlTo[it.debit.slice(5)]||0) + num(it.amount);
       if ((it.credit||'').startsWith('cred:')) jnlTo[it.credit.slice(5)] = (jnlTo[it.credit.slice(5)]||0) - num(it.amount);
     });
+    // Money paid out TO a credit customer — a refund, an advance, settling the other way — moves the
+    // balance as surely as a sale does. Without it the row simply did not add up.
+    cr.payments.forEach(it=>{ if ((it.ledger||'').startsWith('cred:')) jnlTo[it.ledger.slice(5)] = (jnlTo[it.ledger.slice(5)]||0) + num(it.amount); });
     const list = state.creditors.filter(c=> cfg.creditor ? c.id===cfg.creditor : true);
     const rows = list.map(c=>{
       const sold = soldTo[c.id]||0, recd = recdFrom[c.id]||0, jnl = jnlTo[c.id]||0;
       // Closing is the balance at the period's end (today's balance wound back over anything posted
       // since), and opening is that less the period's own movement.
-      const pb = (r.periodBalances||{})['cred:'+c.id];
+      const pb = (cr.periodBalances||{})['cred:'+c.id];
       const closing = pb ? pb.closing : num(c.balance);
       const opening = pb ? pb.opening : (closing - sold + recd - jnl);
       const overLimit = num(c.creditLimit) && closing > num(c.creditLimit);
       return {c, sold, recd, jnl, opening, closing, overLimit};
     });
     const t = (k)=>rows.reduce((s,x)=>s+num(x[k]),0);
-    parts.push(table('Creditor balances', [{label:'Creditor'},{label:'Phone'},{label:'Opening',num:true},{label:'Credit sales',num:true},{label:'Received',num:true},{label:'Closing',num:true},{label:'Credit limit',num:true},{label:'Status'}],
+    parts.push(table('Creditor balances', [{label:'Creditor'},{label:'Phone'},{label:'Opening',num:true},{label:'Credit sales',num:true},{label:'Received',num:true},{label:'Adjustments',num:true},{label:'Closing',num:true},{label:'Credit limit',num:true},{label:'Status'}],
       rows.map(x=>[
         esc(x.c.name) + (x.c.isBowser?' <span class="hint" style="color:var(--text-faint);">(bowser)</span>':'') + (num(ltrTo[x.c.id])?`<div class="hint" style="font-size:11px;color:var(--text-faint)">${liters(ltrTo[x.c.id])} taken</div>`:''),
-        esc(x.c.phone||'—'), money(x.opening), money(x.sold), money(x.recd),
+        esc(x.c.phone||'—'), money(x.opening), money(x.sold), money(x.recd), num(x.jnl)?money(x.jnl):'—',
         `<strong>${money(x.closing)}</strong>`,
         num(x.c.creditLimit)?money(x.c.creditLimit):'—',
         x.overLimit ? '<span class="pill critical">over limit</span>' : (x.closing>0 ? '<span class="pill warning">due</span>' : '<span class="pill good">settled</span>'),
       ]),
-      ['Total','', money(t('opening')), money(t('sold')), money(t('recd')), money(t('closing')), '', '']));
+      ['Total','', money(t('opening')), money(t('sold')), money(t('recd')), money(t('jnl')), money(t('closing')), '', '']));
     const due = rows.filter(x=>x.closing>0).length, over = rows.filter(x=>x.overLimit).length;
     parts.push(`<div class="hint" style="color:var(--text-faint);font-size:12px;margin:-4px 0 4px;">${rows.length} creditor(s) · ${due} with dues · ${over} over their credit limit. Opening and closing are the balances at the start and end of the period, derived by winding today's balance back over everything posted since. A per-creditor statement with every transaction is under the <strong>Ledger statements</strong> report.</div>`);
   }
@@ -3951,7 +3958,7 @@ function renderReportBody(body, cfg, r, c){
     r.payments.forEach(it=>{ if ((it.ledger||'').startsWith('sup:')) { const id = it.ledger.slice(4); paidBySup[id] = (paidBySup[id]||0) + num(it.amount); } });
     // Supplier keys hold a debit-positive balance, so a payable reads as negative there — flip it
     // back to "what we owe" for display.
-    const supBal = (id, which)=>{ const pb = (r.periodBalances||{})['sup:'+id]; return pb ? -num(pb[which]) : null; };
+    const supBal = (id, which)=>{ const pb = ((r.unfiltered||r).periodBalances||{})['sup:'+id]; return pb ? -num(pb[which]) : null; };
     const rows = state.suppliers.map(s=>{
       const closing = supBal(s.id,'closing')!=null ? supBal(s.id,'closing') : num(s.balance);
       const opening = supBal(s.id,'opening')!=null ? supBal(s.id,'opening') : (closing - (purchasedBySup[s.id]||0) + (paidBySup[s.id]||0));
@@ -4193,7 +4200,7 @@ function exportReportExcel(rep){
   if (has('creditors')) addSheet('Creditors', [
     ['Creditor', 'Phone', 'Vehicle', 'Credit limit (₹)', 'Opening (₹)', 'Credit sales (₹)', 'Received (₹)', 'Closing (₹)', 'Bowser stock (L)', 'Status'],
     ...state.creditors.filter(c=>cfg.creditor?c.id===cfg.creditor:true).map(c=>{
-      const pb = (r.periodBalances||{})['cred:'+c.id] || {};
+      const pb = ((r.unfiltered||r).periodBalances||{})['cred:'+c.id] || {};
       const closing = pb.closing!=null ? pb.closing : num(c.balance);
       const sold = r.creditSales.filter(x=>x.creditorId===c.id).reduce((s,x)=>s+num(x.amount),0);
       const recd = r.receipts.filter(x=>x.type==='creditor' && x.creditorId===c.id).reduce((s,x)=>s+num(x.amount),0);
@@ -4204,7 +4211,7 @@ function exportReportExcel(rep){
   if (has('suppliers')) addSheet('Suppliers', [
     ['Supplier', 'Phone', 'Opening (₹)', 'Purchased (₹)', 'Paid (₹)', 'Closing (₹)', 'Notes'],
     ...state.suppliers.map(s=>{
-      const pb = (r.periodBalances||{})['sup:'+s.id] || {};
+      const pb = ((r.unfiltered||r).periodBalances||{})['sup:'+s.id] || {};
       const closing = pb.closing!=null ? -num(pb.closing) : num(s.balance);
       const purchased = r.purchases.filter(x=>x.supplierId===s.id).reduce((a,x)=>a+num(x.amount),0)
         + r.oilPurchases.filter(x=>x.supplierId===s.id).reduce((a,x)=>a+num(x.amount),0);
