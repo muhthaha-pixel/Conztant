@@ -3953,21 +3953,36 @@ function renderReportBody(body, cfg, r, c){
       bowsers.map(c=>[esc(c.name), esc(state.config.products[c.bowserProduct]||c.bowserProduct||'—'), liters(c.bowserCapacityL), liters(c.bowserStockL), money(c.balance)])));
   }
   if (has('suppliers')){
-    const purchasedBySup = {}, paidBySup = {};
-    r.purchases.forEach(it=>{ if (it.supplierId) purchasedBySup[it.supplierId] = (purchasedBySup[it.supplierId]||0) + num(it.amount); });
-    r.payments.forEach(it=>{ if ((it.ledger||'').startsWith('sup:')) { const id = it.ledger.slice(4); paidBySup[id] = (paidBySup[id]||0) + num(it.amount); } });
+    // Balances belong to the account, not to whatever the report is filtered to.
+    const sr = r.unfiltered || r;
+    const purchasedBySup = {}, paidBySup = {}, adjBySup = {};
+    // Only a purchase left on credit raises the payable; one paid for on the spot never touches it.
+    sr.purchases.forEach(it=>{ if (it.supplierId && (!it.payFrom || it.payFrom==='credit')) purchasedBySup[it.supplierId] = (purchasedBySup[it.supplierId]||0) + num(it.amount); });
+    sr.payments.forEach(it=>{ if ((it.ledger||'').startsWith('sup:')) { const id = it.ledger.slice(4); paidBySup[id] = (paidBySup[id]||0) + num(it.amount); } });
+    // What else moves a payable: HP Card takings, which this supplier nets off what we owe them,
+    // and any journal entry posted against them. These columns read as "what we owe", so a debit
+    // lowers it and a credit raises it — the opposite of the sign the ledger works in.
+    const hpKey = hpCardTargetKey();
+    if (hpKey.startsWith('sup:')){
+      const id = hpKey.slice(4);
+      sr.duties.forEach(d=>{ if (num(d.pay.hpCard)) adjBySup[id] = (adjBySup[id]||0) - num(d.pay.hpCard); });
+    }
+    sr.journal.forEach(it=>{
+      if ((it.debit||'').startsWith('sup:')) adjBySup[it.debit.slice(4)] = (adjBySup[it.debit.slice(4)]||0) - num(it.amount);
+      if ((it.credit||'').startsWith('sup:')) adjBySup[it.credit.slice(4)] = (adjBySup[it.credit.slice(4)]||0) + num(it.amount);
+    });
     // Supplier keys hold a debit-positive balance, so a payable reads as negative there — flip it
     // back to "what we owe" for display.
     const supBal = (id, which)=>{ const pb = ((r.unfiltered||r).periodBalances||{})['sup:'+id]; return pb ? -num(pb[which]) : null; };
     const rows = state.suppliers.map(s=>{
       const closing = supBal(s.id,'closing')!=null ? supBal(s.id,'closing') : num(s.balance);
-      const opening = supBal(s.id,'opening')!=null ? supBal(s.id,'opening') : (closing - (purchasedBySup[s.id]||0) + (paidBySup[s.id]||0));
-      return {s, opening, closing};
+      const opening = supBal(s.id,'opening')!=null ? supBal(s.id,'opening') : (closing - (purchasedBySup[s.id]||0) + (paidBySup[s.id]||0) - (adjBySup[s.id]||0));
+      return {s, opening, closing, adj:(adjBySup[s.id]||0)};
     });
     const t = (k)=>rows.reduce((a,x)=>a+num(x[k]),0);
-    parts.push(table('Supplier balances', [{label:'Supplier'},{label:'Phone'},{label:'Opening',num:true},{label:'Purchased (period)',num:true},{label:'Paid (period)',num:true},{label:'Closing',num:true}],
-      rows.map(x=>[esc(x.s.name), esc(x.s.phone||'—'), money(x.opening), money(purchasedBySup[x.s.id]||0), money(paidBySup[x.s.id]||0), `<strong>${money(x.closing)}</strong>`]),
-      ['Total','', money(t('opening')), money(Object.values(purchasedBySup).reduce((a,b)=>a+b,0)), money(Object.values(paidBySup).reduce((a,b)=>a+b,0)), money(t('closing'))]));
+    parts.push(table('Supplier balances', [{label:'Supplier'},{label:'Phone'},{label:'Opening',num:true},{label:'Purchased (period)',num:true},{label:'Paid (period)',num:true},{label:'Adjustments',num:true},{label:'Closing',num:true}],
+      rows.map(x=>[esc(x.s.name), esc(x.s.phone||'—'), money(x.opening), money(purchasedBySup[x.s.id]||0), money(paidBySup[x.s.id]||0), num(x.adj)?money(x.adj):'—', `<strong>${money(x.closing)}</strong>`]),
+      ['Total','', money(t('opening')), money(Object.values(purchasedBySup).reduce((a,b)=>a+b,0)), money(Object.values(paidBySup).reduce((a,b)=>a+b,0)), money(t('adj')), money(t('closing'))]));
   }
   if (has('ledger')){
     const pick = reportLedgerPick(cfg);
