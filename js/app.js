@@ -944,7 +944,7 @@ let dutyForm = null;      // null = list view; object = add/edit form
 let dutyListDate = todayStr();
 
 function newDutyForm(date){
-  return { date, dutyId:null, staffId:'', startTime:'', endTime:'', nozzleIds:[], rows:{}, pos:0, upi:0, hpCard:0, bankAccountId:'', creditSales:[], expenses:[], oils:[], cashCount:{}, _amount:0, _liters:0 };
+  return { date, dutyId:null, staffId:'', startTime:'', endTime:'', nozzleIds:[], rows:{}, pos:0, upi:0, hpCard:0, bankAccountId:'', creditSales:[], expenses:[], purchases:[], oils:[], cashCount:{}, _amount:0, _liters:0 };
 }
 
 function renderShiftEntry(mount){
@@ -1000,6 +1000,7 @@ async function editDuty(date, dutyId){
     bankAccountId:(d.pay&&d.pay.bankAccountId)||'',
     creditSales:(d.creditSales||[]).map(c=>Object.assign({},c)),
     expenses:(d.expenses||[]).map(e=>Object.assign({},e)),
+    purchases:(d.purchases||[]).map(p=>Object.assign({},p)),
     oils:(d.oils||[]).map(o=>Object.assign({}, o, {savedQty:num(o.qty)})),
     cashCount: Object.assign({}, d.cashCount||{}), _amount:(d.fuelAmount!=null?d.fuelAmount:d.dutyAmount)||0, _liters:d.dutyLiters||0,
   };
@@ -1066,6 +1067,9 @@ function renderDutyForm(mount){
       <div class="section-head" style="margin:20px 0 8px;"><h2 style="font-size:13.5px;">Payments from till</h2><button class="btn ghost sm" id="dfAddExpense">${icon('plus')} Add payment</button></div>
       <div id="dfExpenseRows"></div>
 
+      <div class="section-head" style="margin:20px 0 8px;"><h2 style="font-size:13.5px;">Fuel received</h2><button class="btn ghost sm" id="dfAddPurchase">${icon('plus')} Add purchase</button></div>
+      <div id="dfPurchaseRows"></div>
+
       <div class="section-head" style="margin:20px 0 8px;"><h2 style="font-size:13.5px;">Cash denomination count</h2></div>
       <div class="denom-grid" id="dfDenoms"></div>
       <div class="row" style="justify-content:space-between;margin-top:10px;">
@@ -1097,12 +1101,14 @@ function renderDutyForm(mount){
   updateNozzleHint();
   $('#dfAddCredit').onclick = ()=>{ dutyForm.creditSales.push({id:uid(), creditorId:'', creditorName:'', product:'', rate:0, amount:0, liters:0, indentNo:'', vehicleNo:''}); renderCreditRows(); };
   $('#dfAddExpense').onclick = ()=>{ dutyForm.expenses.push({id:uid(), account:'', category:'', description:'', amount:0}); renderDutyExpenseRows(); };
+  $('#dfAddPurchase').onclick = ()=>{ dutyForm.purchases.push(newDutyPurchase()); renderDutyPurchaseRows(); };
   $('#dfAddOil').onclick = ()=>{ dutyForm.oils.push({id:uid(), productId:'', name:'', qty:0, rate:0, amount:0, savedQty:0}); renderOilRows(); };
   $('#dfSave').onclick = saveDutyEntry;
 
   renderDutyRows();
   renderCreditRows();
   renderDutyExpenseRows();
+  renderDutyPurchaseRows();
   renderOilRows();
   renderDenomGrid();
 }
@@ -1578,6 +1584,7 @@ async function saveDutyEntry(){
       date:dutyForm.date, dutyId:dutyForm.dutyId, staffId:dutyForm.staffId, staffName,
       startTime:dutyForm.startTime, endTime:dutyForm.endTime, nozzleIds:dutyForm.nozzleIds, entries,
       pay:{pos:dutyForm.pos||0, upi:dutyForm.upi||0, hpCard:dutyForm.hpCard||0, bankAccountId:dutyForm.bankAccountId||''},
+      purchases: dutyForm.purchases.filter(p=>num(p.liters)>0 && p.tankId).map(p=>({id:p.id, product:p.product, tankId:p.tankId, liters:num(p.liters), rate:num(p.rate), amount:dutyPurchaseAmount(p), supplierId:p.supplierId||'', payFrom:p.payFrom||'credit', ref:p.ref||''})),
       creditSales: dutyForm.creditSales.filter(c=>num(c.amount)>0 || num(c.liters)>0).map(c=>({id:c.id, creditorId:c.creditorId, creditorName:c.creditorName, product:c.product||'', rate:num(c.rate), liters:num(c.liters), amount:num(c.amount), indentNo:c.indentNo||'', vehicleNo:c.vehicleNo||''})),
       expenses: dutyForm.expenses.filter(e=>num(e.amount)>0).map(e=>({id:e.id, account:e.account||'', category:e.category||'', description:e.description||'', amount:num(e.amount), subjectType:e.subjectType||'', subjectId:e.subjectId||'', subjectName:e.subjectName||''})),
       oils: (dutyForm.oils||[]).filter(o=>num(o.amount)>0 || num(o.qty)>0)
@@ -1592,7 +1599,7 @@ async function saveDutyEntry(){
   }
 }
 
-async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTime, nozzleIds, entries, pay, creditSales, expenses, oils, cashCount}){
+async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTime, nozzleIds, entries, pay, creditSales, expenses, purchases, oils, cashCount}){
   const data = (await getDailyLog(date)) || {duties:{}};
   data.duties = data.duties || {};
   const id = dutyId || uid();
@@ -1634,7 +1641,7 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
     staffId, staffName, startTime, endTime, nozzleIds, nozzles: entries, dutyAmount, fuelAmount, oilAmount, dutyLiters,
     pay: {pos:pay.pos||0, upi:pay.upi||0, hpCard:pay.hpCard||0, bankAccountId:pay.bankAccountId||'', credit, creditValued:cs.valued, bowserDiff:cs.bowserDiff, expenses:expenseTotal,
           cash, counted: hasCount ? counted : null, variance, cashPosted},
-    creditSales, expenses: expenses||[], oils: oils||[], cashCount, savedAt: new Date().toISOString(),
+    creditSales, expenses: expenses||[], purchases: purchases||[], oils: oils||[], cashCount, savedAt: new Date().toISOString(),
   };
   data.date = date;
   let dayAmount=0, dayLiters=0;
@@ -1758,6 +1765,8 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
   // Expenses paid out of the till on this duty mirror into the Expenses monthly ledger, so they
   // show up in that report and in the P&L — re-saving an edited duty replaces its own set of lines.
   await syncDutyExpenses(date, id, expenses||[]);
+  // Fuel signed for on this duty goes into the month's purchases the same way.
+  await syncDutyPurchases(date, id, purchases||[]);
 
   // POS + UPI settle into the chosen bank account; only the CHANGE since this duty's last save is
   // applied, and moving the duty from one account to another reverses the old one and credits the new.
@@ -1850,6 +1859,7 @@ async function deleteDuty(date, dutyId){
     if (Object.keys(patch).length) await state.db.doc('creditors/'+cid).update(patch).catch(()=>{});
   }
   await syncDutyExpenses(date, dutyId, []);
+  await syncDutyPurchases(date, dutyId, []);
   for (const o of (d.oils||[])) if (o.productId && num(o.qty)) await adjustOilStock(o.productId, num(o.qty));
   for (const e of (d.expenses||[])) if (e.account && !e.account.startsWith('cat:') && num(e.amount)) await applyPosting(e.account, -num(e.amount), {date, narration:`Deleted duty — ${d.staffName}`, journalId:dutyId});
   // Salary advances booked by this duty come back off the sheet.
@@ -1975,7 +1985,13 @@ async function adjustTankStock(tankId, delta){
   if (!tankId || !delta) return;
   const tank = state.tanks.find(t=>t.id===tankId);
   const cur = tank ? num(tank.currentStockL) : 0;
-  await state.db.doc('tanks/'+tankId).update({currentStockL: cur + delta});
+  const next = cur + delta;
+  await state.db.doc('tanks/'+tankId).update({currentStockL: next});
+  // The snapshot listener will confirm this, but not before the next call in the same save reads
+  // it. Two movements on one tank — an invoice with two compartments of the same product, or a
+  // duty's purchase being reversed and re-applied — would otherwise lose the first, because both
+  // would start from the figure as it stood before either. Oil stock does the same, just below.
+  if (tank) tank.currentStockL = next;
 }
 
 /* ============================== PURCHASE ============================== */
@@ -2002,6 +2018,86 @@ async function applyPurchase(item, sign){
   } else {
     await applyPosting(payFrom, -amt, meta);                                       // money out
   }
+}
+
+// A tanker often arrives mid-shift, and the attendant who signs for it is the one at the pump. The
+// rows here are ordinary purchases — they top up the tank and raise the supplier's due exactly as
+// the Purchase tab does — tagged with the duty that recorded them, so re-saving replaces its own
+// lines rather than adding a second copy.
+function newDutyPurchase(){ return {id:uid(), product:PRODUCT_KEYS[0], tankId:'', liters:'', rate:'', supplierId:'', payFrom:'credit', ref:''}; }
+function dutyPurchaseAmount(p){ return Math.round(num(p.liters) * num(p.rate) * 100)/100; }
+// Paying a tanker out of the till would have to come off the cash the shift owes, which this form
+// works out from the meters. That path already exists under Payments from till, where a supplier can
+// be picked, so the options here are the ones that do not touch the till.
+function dutyPurchasePayOptions(sel){
+  return `<option value="credit" ${sel==='credit'?'selected':''}>On credit (supplier due)</option>`
+    + state.accounts.filter(a=>a.kind==='bank' && a.active!==false).map(a=>`<option value="acct:${a.id}" ${('acct:'+a.id)===sel?'selected':''}>Paid — ${esc(a.name)}</option>`).join('');
+}
+function renderDutyPurchaseRows(){
+  const el = $('#dfPurchaseRows'); if(!el) return;
+  if (!dutyForm.purchases.length){
+    el.innerHTML = `<div class="hint" style="color:var(--text-faint);font-size:12.5px;">No fuel received on this duty.</div>`;
+    return;
+  }
+  el.innerHTML = `<div class="table-wrap"><table>
+      <thead><tr><th>Product</th><th>Tank</th><th class="num">Quantity (L)</th><th class="num">Rate (₹/L)</th><th class="num">Amount</th><th>Supplier</th><th>Payment</th><th>Invoice / DO</th><th></th></tr></thead>
+      <tbody id="dfPurchaseTbody"></tbody></table></div>
+    <div class="hint" style="color:var(--text-faint);font-size:12px;margin-top:6px;">Fuel received during this shift. The tank is topped up and, on credit, the supplier's outstanding balance rises — the same as entering it on the Purchase tab. A tanker paid out of the till belongs under <strong>Payments from till</strong> instead, against that supplier, so the cash the shift owes comes down with it.</div>`;
+  const tbody = $('#dfPurchaseTbody');
+  dutyForm.purchases.forEach(P=>{
+    const tanks = state.tanks.filter(t=>t.active!==false && t.product===P.product);
+    if (!tanks.some(t=>t.id===P.tankId)) P.tankId = tanks.length ? tanks[0].id : '';
+    const tr = document.createElement('tr'); tr.dataset.id = P.id;
+    tr.innerHTML = `
+      <td><select class="dpProduct" style="max-width:150px;">${PRODUCT_KEYS.map(k=>`<option value="${k}" ${k===P.product?'selected':''}>${esc(state.config.products[k]||k)}</option>`).join('')}</select></td>
+      <td><select class="dpTank" style="max-width:150px;">${tanks.length ? tanks.map(t=>`<option value="${t.id}" ${t.id===P.tankId?'selected':''}>${esc(t.name)}</option>`).join('') : `<option value="">No tank for this product</option>`}</select></td>
+      <td class="num"><input type="number" step="0.01" class="dpLtr" value="${esc(String(P.liters))}" placeholder="0.00" style="width:120px;text-align:right;"></td>
+      <td class="num"><input type="number" step="0.0001" class="dpRate" value="${esc(String(P.rate))}" placeholder="0.00" style="width:120px;text-align:right;"></td>
+      <td class="num dpAmt">${money(dutyPurchaseAmount(P))}</td>
+      <td><select class="dpSupplier" style="max-width:150px;"><option value="">Select supplier…</option>${state.suppliers.filter(s=>s.active!==false).map(s=>`<option value="${s.id}" ${s.id===P.supplierId?'selected':''}>${esc(s.name)}</option>`).join('')}</select></td>
+      <td><select class="dpPay" style="max-width:160px;">${dutyPurchasePayOptions(P.payFrom)}</select></td>
+      <td><input type="text" class="dpRef" value="${esc(P.ref||'')}" placeholder="Optional" style="width:110px;"></td>
+      <td><button class="btn ghost sm dpRemove">${icon('trash')}</button></td>`;
+    tbody.appendChild(tr);
+    const read = ()=>{
+      P.liters = tr.querySelector('.dpLtr').value;
+      P.rate = tr.querySelector('.dpRate').value;
+      tr.querySelector('.dpAmt').textContent = money(dutyPurchaseAmount(P));
+    };
+    tr.querySelector('.dpLtr').oninput = read;
+    tr.querySelector('.dpRate').oninput = read;
+    tr.querySelector('.dpProduct').onchange = (e)=>{ P.product = e.target.value; P.tankId = ''; renderDutyPurchaseRows(); };
+    tr.querySelector('.dpTank').onchange = (e)=>{ P.tankId = e.target.value; };
+    tr.querySelector('.dpSupplier').onchange = (e)=>{ P.supplierId = e.target.value; };
+    tr.querySelector('.dpPay').onchange = (e)=>{ P.payFrom = e.target.value; };
+    tr.querySelector('.dpRef').oninput = (e)=>{ P.ref = e.target.value; };
+    tr.querySelector('.dpRemove').onclick = ()=>{ dutyForm.purchases = dutyForm.purchases.filter(x=>x.id!==P.id); renderDutyPurchaseRows(); };
+  });
+}
+// Writes this duty's fuel received into the month's purchases, replacing whatever it wrote before.
+// Every prior line of this duty is reversed in full first, so a changed quantity, tank, supplier or
+// payment source needs no special case.
+async function syncDutyPurchases(date, dutyId, purchaseItems){
+  const monthId = monthIdOf(date);
+  const list = (purchaseItems||[]).filter(p=>num(p.liters)>0 && p.tankId);
+  const existing = await getMonthDoc('stockReceiptsMonthly', monthId);
+  if (!list.length && !existing) return;
+  const data = existing || {items:[], totalLiters:0, totalAmount:0};
+  const prior = (data.items||[]).filter(it=>it.dutyId===dutyId);
+  const kept  = (data.items||[]).filter(it=>it.dutyId!==dutyId);
+  for (const it of prior) await applyPurchase(it, -1);
+  const mine = list.map(p=>{
+    const tank = state.tanks.find(t=>t.id===p.tankId);
+    return {id:p.id||uid(), source:'duty', dutyId, date, product:p.product, tankId:p.tankId,
+      tankName: tank?tank.name:'', liters:num(p.liters), rate:num(p.rate), amount:dutyPurchaseAmount(p),
+      supplierId:p.supplierId||'', supplier:supplierName(p.supplierId, ''), payFrom:p.payFrom||'credit',
+      ref:p.ref||'', by: state.currentUser?state.currentUser.name:''};
+  });
+  data.items = kept.concat(mine);
+  data.totalLiters = data.items.reduce((s,i)=>s+num(i.liters),0);
+  data.totalAmount = data.items.reduce((s,i)=>s+num(i.amount),0);
+  await setMonthDoc('stockReceiptsMonthly', monthId, data);
+  for (const it of mine) await applyPurchase(it, +1);
 }
 
 function renderPurchase(mount){
@@ -5449,18 +5545,22 @@ function renderSetupSuppliers(body){
         <div class="field" style="grid-column:span 2;"><label>Notes</label><input type="text" id="spNotes" placeholder="Optional"></div>
         <div class="field"><button class="btn primary" id="spAdd" style="width:100%" ${state.dbReady?'':'disabled'}>${icon('plus')} Add supplier</button></div>
       </div>
-      <div class="hint" style="color:var(--text-faint);font-size:12px;">Suppliers are picked on the Purchase tab; what you owe each one is tracked as their outstanding balance and settled from Payments / Expenses.</div>
+      <div class="hint" style="color:var(--text-faint);font-size:12px;">Suppliers are picked on the Purchase tab; what you owe each one is tracked as their outstanding balance and settled from Payments / Expenses. Use <strong>Opening</strong> on an existing supplier to state what you owed them on a given date — a balance without a date cannot be checked against its own history.</div>
       <div id="spMsg" style="font-size:13px;"></div>
     </div>
     <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>Name</th><th>Phone</th><th>Notes</th><th>Status</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Phone</th><th class="num">Opening</th><th class="num">Outstanding</th><th>Notes</th><th>Status</th><th></th></tr></thead>
       <tbody>${state.suppliers.length? state.suppliers.map(s=>`<tr>
-        <td>${esc(s.name)}</td><td>${esc(s.phone||'—')}</td><td>${esc(s.notes||'—')}</td>
+        <td>${esc(s.name)}</td><td>${esc(s.phone||'—')}</td>
+        <td class="num">${money(s.openingBalance||0)}${s.openingDate?`<div class="hint" style="font-size:11px;color:var(--text-faint)">as at ${esc(fmtDateLabel(s.openingDate))}</div>`:`<div class="hint" style="font-size:11px;color:var(--warning)">no date set</div>`}</td>
+        <td class="num" ${num(s.balance)>0?'style="color:var(--critical);font-weight:600;"':''}>${money(s.balance||0)}</td>
+        <td>${esc(s.notes||'—')}</td>
         <td><span class="pill ${s.active!==false?'good':'neutral'}">${s.active!==false?'Active':'Inactive'}</span></td>
-        <td><button class="btn ghost sm" data-edit="${s.id}">${icon('edit')}</button> <button class="btn ghost sm" data-toggle="${s.id}" data-cur="${s.active!==false}">${s.active!==false?'Deactivate':'Activate'}</button>${s.active===false?`<button class="btn danger sm" data-delete="${s.id}" style="margin-left:6px;">${icon('trash')}</button>`:''}</td>
-      </tr>`).join('') : `<tr><td colspan="5" class="empty">No suppliers yet.</td></tr>`}</tbody>
+        <td style="white-space:nowrap;"><button class="btn ghost sm" data-openbal="${s.id}">Opening</button> <button class="btn ghost sm" data-edit="${s.id}">${icon('edit')}</button> <button class="btn ghost sm" data-toggle="${s.id}" data-cur="${s.active!==false}">${s.active!==false?'Deactivate':'Activate'}</button>${s.active===false?`<button class="btn danger sm" data-delete="${s.id}" style="margin-left:6px;">${icon('trash')}</button>`:''}</td>
+      </tr>`).join('') : `<tr><td colspan="7" class="empty">No suppliers yet.</td></tr>`}</tbody>
     </table></div></div>
   `;
+  $$('[data-openbal]', body).forEach(b=>b.onclick=()=>openOpeningBalanceModal('supplier', b.dataset.openbal));
   $$('[data-edit]', body).forEach(b=>b.onclick=()=>openSetupEditModal('suppliers', b.dataset.edit));
   $('#spAdd').onclick = async ()=>{
     const name = $('#spName').value.trim();
