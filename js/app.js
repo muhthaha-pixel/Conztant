@@ -633,24 +633,45 @@ function openChangePasswordModal(){
 }
 
 /* ---- generic monthly aggregate doc helpers (read-mutate-set pattern) ---- */
+// A month document is read, changed and written back whole. The cache used to hold what was read
+// for as long as the tab stayed open, with nothing watching for changes — so a second device, or
+// this one left open overnight, would start from a stale list and write it back over the top,
+// erasing whatever had been added in between while its effect on the balances stayed. Entries
+// disappearing, balances that no longer match them. A cached copy is now only trusted briefly:
+// long enough for a report to read the same month many times over, nowhere near long enough to
+// still be holding yesterday's list.
+const MONTH_CACHE_MS = 20000;
 async function getMonthDoc(collection, monthId){
   const cacheKey = collection;
-  state.monthCache[cacheKey] = state.monthCache[cacheKey] || {};
-  if (state.monthCache[cacheKey][monthId] !== undefined) return state.monthCache[cacheKey][monthId];
-  if (!state.db) return null;
+  const store = state.monthCache[cacheKey] = state.monthCache[cacheKey] || {};
+  const stamps = state.monthCacheAt = state.monthCacheAt || {};
+  const at = stamps[cacheKey] = stamps[cacheKey] || {};
+  if (store[monthId] !== undefined && (Date.now() - (at[monthId]||0)) < MONTH_CACHE_MS) return store[monthId];
+  if (!state.db) return store[monthId] !== undefined ? store[monthId] : null;
   const snap = await state.db.doc(collection+'/'+monthId).get();
   const data = snap.exists ? cloneDoc(snap.data()) : null;
-  state.monthCache[cacheKey][monthId] = data;
+  store[monthId] = data;
+  at[monthId] = Date.now();
   return data;
 }
 async function setMonthDoc(collection, monthId, data){
   state.monthCache[collection] = state.monthCache[collection] || {};
   state.monthCache[collection][monthId] = data;
+  state.monthCacheAt = state.monthCacheAt || {};
+  state.monthCacheAt[collection] = state.monthCacheAt[collection] || {};
+  state.monthCacheAt[collection][monthId] = Date.now();
   if (!state.db) return;
   await state.db.doc(collection+'/'+monthId).set(data);
 }
+// Anything about to change a month document reads it through this: never a cached copy, however
+// fresh, because the copy is about to be written back whole and whatever it is missing would go.
+async function freshMonthDoc(collection, monthId){
+  invalidateMonth(collection, monthId);
+  return getMonthDoc(collection, monthId);
+}
 function invalidateMonth(collection, monthId){
   if (state.monthCache[collection]) delete state.monthCache[collection][monthId];
+  if (state.monthCacheAt && state.monthCacheAt[collection]) delete state.monthCacheAt[collection][monthId];
 }
 
 async function getDailyLog(dateStr){
@@ -690,7 +711,7 @@ function hoursBetween(start, end){
 /* ---- rates ---- */
 async function ensureRatesMonthLoaded(monthId){
   if (state.ratesLoadedMonths.has(monthId)) return;
-  const data = await getMonthDoc('ratesMonthly', monthId);
+  const data = await freshMonthDoc('ratesMonthly', monthId);
   const days = (data && data.days) || {};
   Object.keys(days).forEach(d=>{
     state.ratesFlat[monthId+'-'+d] = days[d];
@@ -710,7 +731,7 @@ async function getRateForDate(dateStr, productKey){
 }
 async function setRateForDate(dateStr, rates){
   const monthId = monthIdOf(dateStr), d = dayOf(dateStr);
-  const data = (await getMonthDoc('ratesMonthly', monthId)) || {days:{}};
+  const data = (await freshMonthDoc('ratesMonthly', monthId)) || {days:{}};
   data.days = data.days || {};
   data.days[d] = Object.assign({}, data.days[d]||{}, rates);
   await setMonthDoc('ratesMonthly', monthId, data);
@@ -1723,7 +1744,7 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
   const advIds = new Set([...Object.keys(oldAdv), ...Object.keys(newAdv)]);
   if (advIds.size){
     const salMonth = monthIdOf(date);
-    const salData = (await getMonthDoc('salaryMonthly', salMonth)) || {staff:{}};
+    const salData = (await freshMonthDoc('salaryMonthly', salMonth)) || {staff:{}};
     salData.staff = salData.staff || {};
     let touched = false;
     for (const sid of advIds){
@@ -1867,7 +1888,7 @@ async function deleteDuty(date, dutyId){
   (d.expenses||[]).forEach(e=>{ if (e.subjectType==='staff' && e.subjectId) advBack[e.subjectId] = (advBack[e.subjectId]||0) + num(e.amount); });
   if (Object.keys(advBack).length){
     const salMonth = monthIdOf(date);
-    const salData = await getMonthDoc('salaryMonthly', salMonth);
+    const salData = await freshMonthDoc('salaryMonthly', salMonth);
     if (salData && salData.staff){
       Object.entries(advBack).forEach(([sid, amt])=>{ if (salData.staff[sid]) salData.staff[sid].advance = num(salData.staff[sid].advance) - amt; });
       recomputeSalaryTotals(salData);
@@ -1923,7 +1944,7 @@ async function postHpCard(delta, meta){
 async function syncDutyExpenses(date, dutyId, expenseItems){
   const monthId = monthIdOf(date);
   const list = (expenseItems||[]).filter(e=>num(e.amount)>0);
-  const existing = await getMonthDoc('expensesMonthly', monthId);
+  const existing = await freshMonthDoc('expensesMonthly', monthId);
   if (!list.length && !existing) return;
   const data = existing || {items:[], total:0};
   const kept = (data.items||[]).filter(it=>it.dutyId!==dutyId);
@@ -2080,7 +2101,7 @@ function renderDutyPurchaseRows(){
 async function syncDutyPurchases(date, dutyId, purchaseItems){
   const monthId = monthIdOf(date);
   const list = (purchaseItems||[]).filter(p=>num(p.liters)>0 && p.tankId);
-  const existing = await getMonthDoc('stockReceiptsMonthly', monthId);
+  const existing = await freshMonthDoc('stockReceiptsMonthly', monthId);
   if (!list.length && !existing) return;
   const data = existing || {items:[], totalLiters:0, totalAmount:0};
   const prior = (data.items||[]).filter(it=>it.dutyId===dutyId);
@@ -2316,7 +2337,7 @@ async function addOilPurchase(){
       supplierId:$('#opSupplier').value, supplier:supplierName($('#opSupplier').value,''), payFrom:$('#opPay').value,
       ref:$('#opRef').value.trim(), by: state.currentUser?state.currentUser.name:''};
     const monthId = monthIdOf(date);
-    const data = (await getMonthDoc('oilPurchasesMonthly', monthId)) || {items:[]};
+    const data = (await freshMonthDoc('oilPurchasesMonthly', monthId)) || {items:[]};
     data.items = (data.items||[]).concat([item]);
     data.totalAmount = data.items.reduce((s,i)=>s+num(i.amount),0);
     await setMonthDoc('oilPurchasesMonthly', monthId, data);
@@ -2350,9 +2371,9 @@ function editOilPurchase(monthId, item){
       const newItem = Object.assign({}, item, out, {id:item.id, amount:num(out.qty)*num(out.rate), productName:oilProductName(out.productId), supplier:out.supplierId?supplierName(out.supplierId):''});
       const newMonth = monthIdOf(out.date);
       await applyOilPurchase(item, -1);
-      const oldData = await getMonthDoc('oilPurchasesMonthly', monthId);
+      const oldData = await freshMonthDoc('oilPurchasesMonthly', monthId);
       if (oldData){ oldData.items = (oldData.items||[]).filter(i=>i.id!==item.id); oldData.totalAmount = oldData.items.reduce((s,i)=>s+num(i.amount),0); await setMonthDoc('oilPurchasesMonthly', monthId, oldData); }
-      const newData = (newMonth===monthId && oldData) ? oldData : ((await getMonthDoc('oilPurchasesMonthly', newMonth)) || {items:[]});
+      const newData = (newMonth===monthId && oldData) ? oldData : ((await freshMonthDoc('oilPurchasesMonthly', newMonth)) || {items:[]});
       newData.items = (newData.items||[]).concat([newItem]);
       newData.totalAmount = newData.items.reduce((s,i)=>s+num(i.amount),0);
       await setMonthDoc('oilPurchasesMonthly', newMonth, newData);
@@ -2365,7 +2386,7 @@ function editOilPurchase(monthId, item){
 async function removeOilPurchase(monthId, item){
   const ok = await confirmModal({title:'Delete this oil purchase?', body:'This removes it, takes the quantity back out of stock and reverses the supplier or cash / bank effect.', confirmLabel:'Delete purchase'});
   if (!ok) return;
-  const data = await getMonthDoc('oilPurchasesMonthly', monthId);
+  const data = await freshMonthDoc('oilPurchasesMonthly', monthId);
   if (!data) return;
   data.items = (data.items||[]).filter(i=>i.id!==item.id);
   data.totalAmount = data.items.reduce((s,i)=>s+num(i.amount),0);
@@ -2380,7 +2401,7 @@ async function loadOilPurchaseList(){
   el.innerHTML = `<div class="card empty">Loading…</div>`;
   const monthId = state.activeMonth;
   $('#oilMonthLabel') && ($('#oilMonthLabel').innerHTML = monthSwitcherHtml());
-  const data = await getMonthDoc('oilPurchasesMonthly', monthId);
+  const data = await freshMonthDoc('oilPurchasesMonthly', monthId);
   const items = ((data&&data.items)||[]).slice().sort((a,b)=>b.date.localeCompare(a.date));
   el.innerHTML = `<div class="card"><div class="table-wrap"><table>
     <thead><tr><th>Date</th><th>Product</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Total</th><th>Supplier</th><th>Payment</th><th>Ref</th><th></th></tr></thead>
@@ -2526,7 +2547,7 @@ async function addStockReceipt(){
         supplierId, supplier:supplierName(supplierId), payFrom, ref, by: state.currentUser?state.currentUser.name:''};
     });
     const monthId = monthIdOf(date);
-    const data = (await getMonthDoc('stockReceiptsMonthly', monthId)) || {items:[], totalLiters:0, totalAmount:0};
+    const data = (await freshMonthDoc('stockReceiptsMonthly', monthId)) || {items:[], totalLiters:0, totalAmount:0};
     data.items = (data.items||[]).concat(items);
     data.totalLiters = data.items.reduce((s,i)=>s+num(i.liters),0);
     data.totalAmount = data.items.reduce((s,i)=>s+num(i.amount),0);
@@ -2573,14 +2594,14 @@ function editStockReceipt(monthId, item){
       // Reverse the old purchase in full, then apply the new one — covers a changed tank, supplier,
       // payment source, quantity or month in one path.
       await applyPurchase(item, -1);
-      const oldData = await getMonthDoc('stockReceiptsMonthly', monthId);
+      const oldData = await freshMonthDoc('stockReceiptsMonthly', monthId);
       if (oldData){
         oldData.items = (oldData.items||[]).filter(i=>i.id!==item.id);
         oldData.totalLiters = oldData.items.reduce((s,i)=>s+num(i.liters),0);
         oldData.totalAmount = oldData.items.reduce((s,i)=>s+num(i.amount),0);
         await setMonthDoc('stockReceiptsMonthly', monthId, oldData);
       }
-      const newData = (newMonth===monthId && oldData) ? oldData : ((await getMonthDoc('stockReceiptsMonthly', newMonth)) || {items:[], totalLiters:0, totalAmount:0});
+      const newData = (newMonth===monthId && oldData) ? oldData : ((await freshMonthDoc('stockReceiptsMonthly', newMonth)) || {items:[], totalLiters:0, totalAmount:0});
       newData.items = (newData.items||[]).concat([newItem]);
       newData.totalLiters = newData.items.reduce((s,i)=>s+num(i.liters),0);
       newData.totalAmount = newData.items.reduce((s,i)=>s+num(i.amount),0);
@@ -2594,7 +2615,7 @@ function editStockReceipt(monthId, item){
 async function removeStockReceipt(monthId, item){
   const ok = await confirmModal({title:'Delete this purchase?', body:'This removes it, takes the liters back out of the tank and reverses the supplier or cash / bank effect.', confirmLabel:'Delete purchase'});
   if (!ok) return;
-  const data = await getMonthDoc('stockReceiptsMonthly', monthId);
+  const data = await freshMonthDoc('stockReceiptsMonthly', monthId);
   if (!data) return;
   data.items = (data.items||[]).filter(i=>i.id!==item.id);
   data.totalLiters = data.items.reduce((s,i)=>s+num(i.liters),0);
@@ -2610,7 +2631,7 @@ async function loadStockReceiptsList(){
   el.innerHTML = `<div class="card empty">Loading…</div>`;
   const monthId = state.activeMonth;
   $('#stockMonthLabel') && ($('#stockMonthLabel').innerHTML = monthSwitcherHtml());
-  const data = await getMonthDoc('stockReceiptsMonthly', monthId);
+  const data = await freshMonthDoc('stockReceiptsMonthly', monthId);
   const items = (data && data.items || []).slice().sort((a,b)=>b.date.localeCompare(a.date));
   el.innerHTML = `<div class="card"><div class="table-wrap"><table>
     <thead><tr><th>Date</th><th>Supplier</th><th>Product</th><th>Tank</th><th class="num">Liters</th><th class="num">Rate</th><th class="num">Amount</th><th>Payment</th><th>Ref</th><th></th></tr></thead>
@@ -2703,7 +2724,7 @@ function renderExpenses(mount){
 async function bookSalaryAdvance(staffId, delta, date){
   if (!staffId || !delta || !date) return;
   const salMonth = monthIdOf(date);
-  const salData = (await getMonthDoc('salaryMonthly', salMonth)) || {staff:{}};
+  const salData = (await freshMonthDoc('salaryMonthly', salMonth)) || {staff:{}};
   salData.staff = salData.staff || {};
   if (!salData.staff[staffId]){
     const person = state.staff.find(s=>s.id===staffId);
@@ -2739,7 +2760,7 @@ async function addExpense(){
   $('#exSave').disabled = true;
   try{
     const monthId = monthIdOf(item.date);
-    const data = (await getMonthDoc('expensesMonthly', monthId)) || {items:[], total:0};
+    const data = (await freshMonthDoc('expensesMonthly', monthId)) || {items:[], total:0};
     data.items = (data.items||[]).concat([item]);
     data.total = data.items.reduce((s,i)=>s+num(i.amount),0);
     await setMonthDoc('expensesMonthly', monthId, data);
@@ -2755,7 +2776,7 @@ async function addExpense(){
 }
 
 async function removeExpense(monthId, itemId){
-  const data = await getMonthDoc('expensesMonthly', monthId);
+  const data = await freshMonthDoc('expensesMonthly', monthId);
   if (!data) return;
   const item = (data.items||[]).find(i=>i.id===itemId);
   if (!item) return;
@@ -2808,9 +2829,9 @@ function editExpense(monthId, item){
       const newMonth = monthIdOf(out.date);
       await applyExpenseItem(item, -1);
       await bookSalaryAdvance(item.subjectId, -expenseAdvance(item), item.date);
-      const oldData = await getMonthDoc('expensesMonthly', monthId);
+      const oldData = await freshMonthDoc('expensesMonthly', monthId);
       if (oldData){ oldData.items = (oldData.items||[]).filter(i=>i.id!==item.id); oldData.total = oldData.items.reduce((s,i)=>s+num(i.amount),0); await setMonthDoc('expensesMonthly', monthId, oldData); }
-      const newData = (newMonth===monthId && oldData) ? oldData : ((await getMonthDoc('expensesMonthly', newMonth)) || {items:[], total:0});
+      const newData = (newMonth===monthId && oldData) ? oldData : ((await freshMonthDoc('expensesMonthly', newMonth)) || {items:[], total:0});
       newData.items = (newData.items||[]).concat([newItem]);
       newData.total = newData.items.reduce((s,i)=>s+num(i.amount),0);
       await setMonthDoc('expensesMonthly', newMonth, newData);
@@ -2827,7 +2848,7 @@ async function loadExpensesList(){
   el.innerHTML = `<div class="card empty">Loading…</div>`;
   const monthId = state.activeMonth;
   $('#exMonthLabel') && ($('#exMonthLabel').innerHTML = monthSwitcherHtml());
-  const data = await getMonthDoc('expensesMonthly', monthId);
+  const data = await freshMonthDoc('expensesMonthly', monthId);
   const items = (data && data.items || []).slice().sort((a,b)=>b.date.localeCompare(a.date));
   const expTotal = items.filter(i=>expenseKind(i)==='expense').reduce((s,i)=>s+num(i.amount),0);
   const payTotal = items.filter(i=>expenseKind(i)==='payment').reduce((s,i)=>s+num(i.amount),0);
@@ -2868,7 +2889,7 @@ function renderSalary(mount){
 
 async function generateSalarySheet(){
   const monthId = state.activeMonth;
-  const data = (await getMonthDoc('salaryMonthly', monthId)) || {staff:{}};
+  const data = (await freshMonthDoc('salaryMonthly', monthId)) || {staff:{}};
   data.staff = data.staff || {};
   const activeStaff = state.staff.filter(s=>s.active!==false);
   const needsHours = activeStaff.some(s=>!data.staff[s.id] && num(s.hourlyWage)>0);
@@ -2913,7 +2934,7 @@ async function loadSalaryList(){
   el.innerHTML = `<div class="card empty">Loading…</div>`;
   const monthId = state.activeMonth;
   $('#salMonthLabel') && ($('#salMonthLabel').innerHTML = monthSwitcherHtml());
-  const data = await getMonthDoc('salaryMonthly', monthId) || {staff:{}};
+  const data = await freshMonthDoc('salaryMonthly', monthId) || {staff:{}};
   const rows = Object.entries(data.staff||{});
   el.innerHTML = `<div class="card"><div class="table-wrap"><table>
     <thead><tr><th>Staff</th><th class="num">Base</th><th class="num">Advance</th><th class="num">Deduction</th><th class="num">Net</th><th>Status</th><th></th></tr></thead>
@@ -2960,7 +2981,7 @@ function editSalaryRecord(monthId, staffId, s){
     title:`Edit salary — ${esc(s.name)}`, fields:SALARY_EDIT_FIELDS, values:s,
     onSave: async (out)=>{
       if (!state.dbReady) throw new Error("Live data isn't connected.");
-      const data = await getMonthDoc('salaryMonthly', monthId);
+      const data = await freshMonthDoc('salaryMonthly', monthId);
       if (!data || !data.staff || !data.staff[staffId]) throw new Error('Record not found.');
       const changes = diffFields(SALARY_EDIT_FIELDS, data.staff[staffId], out);
       data.staff[staffId] = Object.assign({}, data.staff[staffId], out, {
@@ -2974,7 +2995,7 @@ function editSalaryRecord(monthId, staffId, s){
   });
 }
 async function updateSalaryField(monthId, staffId, field, val){
-  const data = await getMonthDoc('salaryMonthly', monthId);
+  const data = await freshMonthDoc('salaryMonthly', monthId);
   if (!data || !data.staff || !data.staff[staffId]) return;
   const old = data.staff[staffId][field];
   const label = field==='advance' ? 'Advance' : 'Deduction';
@@ -2985,7 +3006,7 @@ async function updateSalaryField(monthId, staffId, field, val){
   loadSalaryList();
 }
 async function markSalaryPaid(monthId, staffId){
-  const data = await getMonthDoc('salaryMonthly', monthId);
+  const data = await freshMonthDoc('salaryMonthly', monthId);
   if (!data || !data.staff || !data.staff[staffId]) return;
   data.staff[staffId].status = 'paid';
   data.staff[staffId].paidDate = todayStr();
@@ -3217,18 +3238,18 @@ async function computeReport(from, to, f){
   });
   r.revenue = r.fuelRevenue + r.oilRevenue;
   for (const m of months){
-    const st = await getMonthDoc('stockReceiptsMonthly', m);
+    const st = await freshMonthDoc('stockReceiptsMonthly', m);
     ((st&&st.items)||[]).forEach(it=>{ if (inRange(it.date) && (!productFilter || it.product===productFilter)) r.purchases.push(it); });
-    const op = await getMonthDoc('oilPurchasesMonthly', m);
+    const op = await freshMonthDoc('oilPurchasesMonthly', m);
     ((op&&op.items)||[]).forEach(it=>{ if (inRange(it.date)) r.oilPurchases.push(it); });
-    const ex = await getMonthDoc('expensesMonthly', m);
+    const ex = await freshMonthDoc('expensesMonthly', m);
     ((ex&&ex.items)||[]).forEach(it=>{ if (!inRange(it.date)) return; if (expenseKind(it)==='payment') r.payments.push(it); else r.expenses.push(it); });
-    const jn = await getMonthDoc('journalMonthly', m);
+    const jn = await freshMonthDoc('journalMonthly', m);
     ((jn&&jn.items)||[]).forEach(it=>{ if (inRange(it.date)) r.journal.push(it); });
-    const rc = await getMonthDoc('receiptsMonthly', m);
+    const rc = await freshMonthDoc('receiptsMonthly', m);
     ((rc&&rc.items)||[]).forEach(it=>{ if (inRange(it.date) && (!f.creditor || it.creditorId===f.creditor)) r.receipts.push(it); });
     // Salary is a monthly sheet — a month counts when any part of it falls in the range.
-    const sal = await getMonthDoc('salaryMonthly', m);
+    const sal = await freshMonthDoc('salaryMonthly', m);
     // Salary is the cost EARNED in the month (base less any deduction), not what was handed over:
     // an advance already paid out is a prepayment, and the balance is still owed. Both sit on the
     // balance sheet, so the P&L carries the full month's salary either way.
@@ -3450,7 +3471,7 @@ async function latestPurchaseRates(uptoDate){
   const byTank = {}, byProduct = {};
   let cursor = monthIdOf(uptoDate);
   for (let i=0; i<24; i++){
-    const data = await getMonthDoc('stockReceiptsMonthly', cursor);
+    const data = await freshMonthDoc('stockReceiptsMonthly', cursor);
     // Months are scanned newest-first, so only a genuinely later purchase may replace what's held —
     // otherwise an older month would overwrite the rate found in a newer one.
     const keepLater = (map, key, it)=>{ if (!map[key] || it.date > map[key].date) map[key] = {rate:num(it.rate), date:it.date}; };
@@ -3506,9 +3527,9 @@ async function stockSnapshot(dateStr){
   const startMonth = monthIdOf(dateStr), nowMonth = monthIdOf(todayStr());
   let m = startMonth;
   for (let i=0; i<=60 && m<=nowMonth; i++){
-    const fuel = await getMonthDoc('stockReceiptsMonthly', m);
+    const fuel = await freshMonthDoc('stockReceiptsMonthly', m);
     ((fuel&&fuel.items)||[]).forEach(it=>{ if (it.date>dateStr && it.tankId) tankBack[it.tankId] = (tankBack[it.tankId]||0) + num(it.liters); });
-    const oilP = await getMonthDoc('oilPurchasesMonthly', m);
+    const oilP = await freshMonthDoc('oilPurchasesMonthly', m);
     ((oilP&&oilP.items)||[]).forEach(it=>{ if (it.date>dateStr && it.productId) oilBack[it.productId] = (oilBack[it.productId]||0) + num(it.qty); });
     (await getMonthDailyLogs(m)).forEach(doc=>{
       if (!doc.date || doc.date<=dateStr) return;
@@ -3551,7 +3572,7 @@ async function latestOilRates(uptoDate){
   const seen = {};   // productId -> {rate, date}; newest-first scan, so only a later date replaces
   let m = monthIdOf(uptoDate);
   for (let i=0; i<24; i++){
-    const data = await getMonthDoc('oilPurchasesMonthly', m);
+    const data = await freshMonthDoc('oilPurchasesMonthly', m);
     ((data&&data.items)||[]).forEach(it=>{
       if (it.date>uptoDate || !it.productId || !num(it.rate)) return;
       if (!seen[it.productId] || it.date > seen[it.productId].date) seen[it.productId] = {rate:num(it.rate), date:it.date};
@@ -4637,7 +4658,7 @@ async function addJournalEntry(){
   try{
     const monthId = monthIdOf(date);
     const item = {id:uid(), date, debit, debitLabel:targetLabel(debit)||debit, credit, creditLabel:targetLabel(credit)||credit, amount, narration, by: state.currentUser?state.currentUser.name:'', savedAt:new Date().toISOString()};
-    const data = (await getMonthDoc('journalMonthly', monthId)) || {items:[]};
+    const data = (await freshMonthDoc('journalMonthly', monthId)) || {items:[]};
     data.items = (data.items||[]).concat([item]);
     await setMonthDoc('journalMonthly', monthId, data);
     await applyJournalItem(item, +1);
@@ -4652,7 +4673,7 @@ async function addJournalEntry(){
 async function removeJournalEntry(monthId, item){
   const ok = await confirmModal({title:'Delete this journal entry?', body:'This removes it and reverses its effect on both account balances.', confirmLabel:'Delete entry'});
   if (!ok) return;
-  const data = await getMonthDoc('journalMonthly', monthId);
+  const data = await freshMonthDoc('journalMonthly', monthId);
   if (!data) return;
   data.items = (data.items||[]).filter(i=>i.id!==item.id);
   await setMonthDoc('journalMonthly', monthId, data);
@@ -4682,9 +4703,9 @@ function editJournalEntry(monthId, item){
       const newMonth = monthIdOf(out.date);
       // Reverse the old posting, then apply the new one — handles a change of account, amount or month.
       await applyJournalItem(item, -1);
-      const oldData = await getMonthDoc('journalMonthly', monthId);
+      const oldData = await freshMonthDoc('journalMonthly', monthId);
       if (oldData){ oldData.items = (oldData.items||[]).filter(i=>i.id!==item.id); await setMonthDoc('journalMonthly', monthId, oldData); }
-      const newData = (newMonth===monthId && oldData) ? oldData : ((await getMonthDoc('journalMonthly', newMonth)) || {items:[]});
+      const newData = (newMonth===monthId && oldData) ? oldData : ((await freshMonthDoc('journalMonthly', newMonth)) || {items:[]});
       newData.items = (newData.items||[]).concat([newItem]);
       await setMonthDoc('journalMonthly', newMonth, newData);
       await applyJournalItem(newItem, +1);
@@ -4699,7 +4720,7 @@ async function loadJournalList(){
   el.innerHTML = `<div class="card empty">Loading…</div>`;
   const monthId = state.activeMonth;
   $('#jeMonthLabel') && ($('#jeMonthLabel').innerHTML = monthSwitcherHtml());
-  const data = await getMonthDoc('journalMonthly', monthId);
+  const data = await freshMonthDoc('journalMonthly', monthId);
   const items = ((data&&data.items)||[]).slice().sort((a,b)=>b.date.localeCompare(a.date) || (b.savedAt||'').localeCompare(a.savedAt||''));
   const pl = journalPL(data);
   el.innerHTML = `<div class="card"><div class="table-wrap"><table>
@@ -4862,7 +4883,7 @@ async function addReceipt(){
   $('#rcSave').disabled = true;
   try{
     const monthId = monthIdOf(item.date);
-    const data = (await getMonthDoc('receiptsMonthly', monthId)) || {items:[]};
+    const data = (await freshMonthDoc('receiptsMonthly', monthId)) || {items:[]};
     data.items = (data.items||[]).concat([item]);
     await setMonthDoc('receiptsMonthly', monthId, data);
     await applyReceipt(item, +1);
@@ -4876,7 +4897,7 @@ async function addReceipt(){
 async function removeReceipt(monthId, item){
   const ok = await confirmModal({title:'Delete this receipt?', body: item.type==='creditor' ? "This removes it and adds the amount back to the creditor's outstanding balance." : 'This removes it and reverses its effect on the cash / bank balance.', confirmLabel:'Delete receipt'});
   if (!ok) return;
-  const data = await getMonthDoc('receiptsMonthly', monthId);
+  const data = await freshMonthDoc('receiptsMonthly', monthId);
   if (!data) return;
   data.items = (data.items||[]).filter(i=>i.id!==item.id);
   await setMonthDoc('receiptsMonthly', monthId, data);
@@ -4909,9 +4930,9 @@ function editReceipt(monthId, item){
       if (newItem.type==='creditor'){ const c = state.creditors.find(x=>x.id===newItem.creditorId); newItem.creditorName = c ? c.name : ''; }
       const newMonth = monthIdOf(out.date);
       await applyReceipt(item, -1);
-      const oldData = await getMonthDoc('receiptsMonthly', monthId);
+      const oldData = await freshMonthDoc('receiptsMonthly', monthId);
       if (oldData){ oldData.items = (oldData.items||[]).filter(i=>i.id!==item.id); await setMonthDoc('receiptsMonthly', monthId, oldData); }
-      const newData = (newMonth===monthId && oldData) ? oldData : ((await getMonthDoc('receiptsMonthly', newMonth)) || {items:[]});
+      const newData = (newMonth===monthId && oldData) ? oldData : ((await freshMonthDoc('receiptsMonthly', newMonth)) || {items:[]});
       newData.items = (newData.items||[]).concat([newItem]);
       await setMonthDoc('receiptsMonthly', newMonth, newData);
       await applyReceipt(newItem, +1);
@@ -4926,7 +4947,7 @@ async function loadReceiptsList(){
   el.innerHTML = `<div class="card empty">Loading…</div>`;
   const monthId = state.activeMonth;
   $('#rcMonthLabel') && ($('#rcMonthLabel').innerHTML = monthSwitcherHtml());
-  const data = await getMonthDoc('receiptsMonthly', monthId);
+  const data = await freshMonthDoc('receiptsMonthly', monthId);
   const items = ((data&&data.items)||[]).slice().sort((a,b)=>b.date.localeCompare(a.date) || (b.savedAt||'').localeCompare(a.savedAt||''));
   const total = items.reduce((s,i)=>s+num(i.amount),0);
   const intoLabel = (k)=> k==='cash' ? 'Cash in hand' : ((state.accounts.find(a=>'acct:'+a.id===k)||{}).name || k || '—');
@@ -5282,7 +5303,7 @@ async function tankMovementSince(tankId, fromDate){
   let m = monthIdOf(fromDate);
   const last = monthIdOf(todayStr());
   for (let i=0; i<=60 && m<=last; i++){
-    const st = await getMonthDoc('stockReceiptsMonthly', m);
+    const st = await freshMonthDoc('stockReceiptsMonthly', m);
     ((st&&st.items)||[]).forEach(it=>{ if (it.tankId===tankId && it.date>=fromDate) received += num(it.liters); });
     (await getMonthDailyLogs(m)).forEach(doc=>{
       if (!doc.date || doc.date < fromDate) return;
