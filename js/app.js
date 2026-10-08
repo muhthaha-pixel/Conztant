@@ -395,6 +395,44 @@ async function initDb(){
   state.dbReady = !!state.db;
   if (state.dbReady) subscribeMasters();
   renderAll();
+  if (state.dbReady) startPrefetch();
+}
+
+// A report's first run spends most of its time waiting for months it could have asked for while
+// nobody was looking. This warms the read cache for the months a report is most likely to want —
+// this one and last — in the background, so opening Reports finds them already in hand.
+//
+// It only fills the cache that reading uses. Anything that CHANGES a month still goes through
+// freshMonthDoc and reads the live document, so nothing here can make a write act on stale data.
+// The cache expires on its own, so this is topped up rather than left to go stale.
+const PREFETCH_COLLECTIONS = ['stockReceiptsMonthly','oilPurchasesMonthly','expensesMonthly','journalMonthly','receiptsMonthly','salaryMonthly'];
+let prefetchTimer = null;
+async function prefetchReportMonths(includePrevious){
+  if (!state.dbReady || !state.db) return;
+  const months = [monthIdOf(todayStr())];
+  // Last month is worth having the first time, for a report run early in a new month or one that
+  // straddles the turn. Topping it up every couple of minutes is not worth the reads.
+  if (includePrevious){ const prev = shiftMonth(months[0], -1); if (prev) months.push(prev); }
+  try{
+    await Promise.all(months.flatMap(m=>[
+      getMonthDailyLogs(m),
+      ...PREFETCH_COLLECTIONS.map(c=>getMonthDoc(c, m)),
+    ]));
+  }catch(e){ /* a warm cache is a convenience; failing to fill it must not surface anywhere */ }
+}
+// Started once the first screen is up, and kept topped up a little more often than the cache
+// expires so a report run rarely finds it cold. Hidden tabs are skipped — the pump's screen is
+// often left open all day and there is no sense paying for reads nobody is waiting on.
+function startPrefetch(){
+  if (prefetchTimer) return;
+  let first = true;
+  // Just inside the cache's own two minutes, so a report rarely finds it cold, and only the current
+  // month after the first pass. A screen left open all day costs about seven reads a minute-and-a-
+  // half this way rather than fourteen.
+  const tick = ()=>{ if (document.hidden) return; prefetchReportMonths(first); first = false; };
+  setTimeout(tick, 1500);
+  prefetchTimer = setInterval(tick, 100000);
+  document.addEventListener('visibilitychange', ()=>{ if (!document.hidden) tick(); });
 }
 
 function subscribeMasters(){
