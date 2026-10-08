@@ -640,7 +640,9 @@ function openChangePasswordModal(){
 // disappearing, balances that no longer match them. A cached copy is now only trusted briefly:
 // long enough for a report to read the same month many times over, nowhere near long enough to
 // still be holding yesterday's list.
-const MONTH_CACHE_MS = 20000;
+// Long enough that one report, which reads the same months over and over, fetches each once.
+// Safe to hold because every path that CHANGES a month goes through freshMonthDoc instead.
+const MONTH_CACHE_MS = 120000;
 async function getMonthDoc(collection, monthId){
   const cacheKey = collection;
   const store = state.monthCache[cacheKey] = state.monthCache[cacheKey] || {};
@@ -3223,6 +3225,19 @@ function rangeLabel(from, to){
   return fmtDateLabel(from)+' – '+fmtDateLabel(to);
 }
 
+// One report asks for the same span more than once: the period itself, the trailing stretch used to
+// wind balances back, and the run from a confirmed opening date. Each was a full pass over the
+// books. These passes only ever get read, so the result is held briefly and handed out again.
+// Anything that goes on to attach its own figures to a report asks computeReport directly.
+const reportMemo = {at:0, by:{}};
+const REPORT_MEMO_MS = 30000;
+async function computeReportCached(from, to, f){
+  if (Date.now() - reportMemo.at > REPORT_MEMO_MS){ reportMemo.by = {}; reportMemo.at = Date.now(); }
+  const key = from+'|'+to+'|'+JSON.stringify(f||{});
+  if (!reportMemo.by[key]) reportMemo.by[key] = computeReport(from, to, f);
+  return reportMemo.by[key];
+}
+function clearReportMemo(){ reportMemo.by = {}; reportMemo.at = 0; }
 async function computeReport(from, to, f){
   const months = monthsBetween(from, to);
   const inRange = (d)=> d>=from && d<=to;
@@ -3268,18 +3283,21 @@ async function computeReport(from, to, f){
   });
   r.revenue = r.fuelRevenue + r.oilRevenue;
   for (const m of months){
-    const st = await freshMonthDoc('stockReceiptsMonthly', m);
+    // Reading, not writing: the cached copy is fine here, and one report asks for the same months
+    // over and over. Going to the server each time is what made reports crawl. The six are asked
+    // for together rather than one after another — they do not depend on each other, so waiting out
+    // six round trips in a row only added up.
+    const [st, op, ex, jn, rc, sal] = await Promise.all([
+      getMonthDoc('stockReceiptsMonthly', m), getMonthDoc('oilPurchasesMonthly', m),
+      getMonthDoc('expensesMonthly', m),      getMonthDoc('journalMonthly', m),
+      getMonthDoc('receiptsMonthly', m),      getMonthDoc('salaryMonthly', m),
+    ]);
     ((st&&st.items)||[]).forEach(it=>{ if (inRange(it.date) && (!productFilter || it.product===productFilter)) r.purchases.push(it); });
-    const op = await freshMonthDoc('oilPurchasesMonthly', m);
     ((op&&op.items)||[]).forEach(it=>{ if (inRange(it.date)) r.oilPurchases.push(it); });
-    const ex = await freshMonthDoc('expensesMonthly', m);
     ((ex&&ex.items)||[]).forEach(it=>{ if (!inRange(it.date)) return; if (expenseKind(it)==='payment') r.payments.push(it); else r.expenses.push(it); });
-    const jn = await freshMonthDoc('journalMonthly', m);
     ((jn&&jn.items)||[]).forEach(it=>{ if (inRange(it.date)) r.journal.push(it); });
-    const rc = await freshMonthDoc('receiptsMonthly', m);
     ((rc&&rc.items)||[]).forEach(it=>{ if (inRange(it.date) && (!f.creditor || it.creditorId===f.creditor)) r.receipts.push(it); });
     // Salary is a monthly sheet — a month counts when any part of it falls in the range.
-    const sal = await freshMonthDoc('salaryMonthly', m);
     // Salary is the cost EARNED in the month (base less any deduction), not what was handed over:
     // an advance already paid out is a prepayment, and the balance is still owed. Both sit on the
     // balance sheet, so the P&L carries the full month's salary either way.
@@ -3452,7 +3470,7 @@ function buildLedgerPostings(r){
 async function ledgerPeriodBalances(r){
   const movementAfter = {};
   if (r.to < todayStr()){
-    const trailing = await computeReport(addDays(r.to, 1), todayStr(), {});
+    const trailing = await computeReportCached(addDays(r.to, 1), todayStr(), {});
     buildLedgerPostings(trailing).forEach(p=>{ movementAfter[p.key] = (movementAfter[p.key]||0) + p.dr - p.cr; });
   }
   const movementIn = {};
@@ -3464,7 +3482,7 @@ async function ledgerPeriodBalances(r){
   const withAnchor = ledgerAccountList().filter(a=>a.openingDate && a.openingBalance!=null && r.from >= a.openingDate);
   if (withAnchor.length){
     const earliest = withAnchor.map(a=>a.openingDate).sort()[0];
-    const since = earliest <= r.to ? buildLedgerPostings(await computeReport(earliest, r.to, {})) : [];
+    const since = earliest <= r.to ? buildLedgerPostings(await computeReportCached(earliest, r.to, {})) : [];
     withAnchor.forEach(a=>{
       let before = 0, within = 0;
       since.forEach(p=>{
@@ -3509,8 +3527,12 @@ function ledgerStatements(r, pick){
 async function latestPurchaseRates(uptoDate){
   const byTank = {}, byProduct = {};
   let cursor = monthIdOf(uptoDate);
-  for (let i=0; i<24; i++){
-    const data = await freshMonthDoc('stockReceiptsMonthly', cursor);
+  // The scan stops after three months running with nothing in them: a station that started this
+  // year has no 2024 purchases to find, and asking for each missing month is a round trip apiece.
+  let empty = 0;
+  for (let i=0; i<24 && empty<3; i++){
+    const data = await getMonthDoc('stockReceiptsMonthly', cursor);
+    empty = (data && (data.items||[]).length) ? 0 : empty+1;
     // Months are scanned newest-first, so only a genuinely later purchase may replace what's held —
     // otherwise an older month would overwrite the rate found in a newer one.
     const keepLater = (map, key, it)=>{ if (!map[key] || it.date > map[key].date) map[key] = {rate:num(it.rate), date:it.date}; };
@@ -3566,9 +3588,9 @@ async function stockSnapshot(dateStr){
   const startMonth = monthIdOf(dateStr), nowMonth = monthIdOf(todayStr());
   let m = startMonth;
   for (let i=0; i<=60 && m<=nowMonth; i++){
-    const fuel = await freshMonthDoc('stockReceiptsMonthly', m);
+    const fuel = await getMonthDoc('stockReceiptsMonthly', m);
     ((fuel&&fuel.items)||[]).forEach(it=>{ if (it.date>dateStr && it.tankId) tankBack[it.tankId] = (tankBack[it.tankId]||0) + num(it.liters); });
-    const oilP = await freshMonthDoc('oilPurchasesMonthly', m);
+    const oilP = await getMonthDoc('oilPurchasesMonthly', m);
     ((oilP&&oilP.items)||[]).forEach(it=>{ if (it.date>dateStr && it.productId) oilBack[it.productId] = (oilBack[it.productId]||0) + num(it.qty); });
     (await getMonthDailyLogs(m)).forEach(doc=>{
       if (!doc.date || doc.date<=dateStr) return;
@@ -3610,8 +3632,10 @@ async function stockSnapshot(dateStr){
 async function latestOilRates(uptoDate){
   const seen = {};   // productId -> {rate, date}; newest-first scan, so only a later date replaces
   let m = monthIdOf(uptoDate);
-  for (let i=0; i<24; i++){
-    const data = await freshMonthDoc('oilPurchasesMonthly', m);
+  let empty = 0;
+  for (let i=0; i<24 && empty<3; i++){
+    const data = await getMonthDoc('oilPurchasesMonthly', m);
+    empty = (data && (data.items||[]).length) ? 0 : empty+1;
     ((data&&data.items)||[]).forEach(it=>{
       if (it.date>uptoDate || !it.productId || !num(it.rate)) return;
       if (!seen[it.productId] || it.date > seen[it.productId].date) seen[it.productId] = {rate:num(it.rate), date:it.date};
@@ -3751,6 +3775,7 @@ async function runReport(exportAfter){
   const body = $('#repBody'); if (!body) return;
   if (!cfg.from || !cfg.to || cfg.from>cfg.to){ body.innerHTML = `<div class="card empty">Pick a valid From / To range.</div>`; return; }
   saveReportCfg();
+  clearReportMemo();
   body.innerHTML = `<div class="card empty">Crunching the numbers…</div>`;
   const filters = {staff:cfg.staff, product:cfg.product, nozzle:cfg.nozzle, creditor:cfg.creditor, method:cfg.method, basis:cfg.basis};
   const main = await computeReport(cfg.from, cfg.to, filters);
@@ -5734,7 +5759,7 @@ function renderSetupAccounts(body){
 // then works the current balance out from the movements in between.
 async function accountMovementSince(accountKey, fromDate){
   if (fromDate > todayStr()) return 0;
-  const r = await computeReport(fromDate, todayStr(), {});
+  const r = await computeReportCached(fromDate, todayStr(), {});
   return buildLedgerPostings(r).filter(p=>p.key===accountKey).reduce((s,p)=>s + p.dr - p.cr, 0);
 }
 // The key a ledger's postings are filed under. Cash in hand is addressed as 'cash' everywhere.
@@ -6097,7 +6122,7 @@ async function auditBalances(){
   // One report over the whole span, sliced per account — an account at a time would mean one pass
   // over the books each.
   const from = accounts.map(a=>a.openingDate).sort()[0];
-  const postings = buildLedgerPostings(await computeReport(from, todayStr(), {}));
+  const postings = buildLedgerPostings(await computeReportCached(from, todayStr(), {}));
   const rows = accounts.map(a=>{
     const movement = postings.filter(x=>x.key===a.key && x.date>=a.openingDate)
       .reduce((s,x)=>s + x.dr - x.cr, 0);
@@ -6111,7 +6136,7 @@ async function auditBalances(){
 // named no account to land in. A duty's card and UPI takings are deducted from the cash the shift
 // owes whether or not a bank account was chosen, so leaving it blank quietly loses them.
 async function strandedBankTakings(from){
-  const r = await computeReport(from, todayStr(), {});
+  const r = await computeReportCached(from, todayStr(), {});
   return r.duties.filter(d=>num(d.pay.pos)+num(d.pay.upi) > 0 && !d.pay.bankAccountId)
     .map(d=>({date:d.date, staffName:d.staffName, amount: num(d.pay.pos)+num(d.pay.upi)}));
 }
