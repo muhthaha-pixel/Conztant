@@ -150,6 +150,12 @@
   .empty{padding:28px 16px;text-align:center;color:var(--text-faint);font-size:13.5px;}
   .banner{display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border-radius:var(--radius-sm);background:var(--warning-tint);color:var(--warning);font-size:13px;margin-bottom:16px;}
   .banner.info{background:var(--brand-tint);color:var(--brand-strong);}
+  /* The day sheets keep the colour blocks the station's own hand-written sheets use, one per
+     product, so a column is found by eye. Tints rather than the full colours, so the figures on
+     top stay readable in either theme and on a printed page. */
+  :root{--sheet-ms:#d8f3dc;--sheet-hsd:#d6e4f7;--sheet-pow:#fbe0cd;}
+  :root:not([data-theme="light"]) .sheet td, :root:not([data-theme="light"]) .sheet th{color:#111;}
+  .sheet td, .sheet th{border-right:1px solid var(--border);}
   /* The icon carries no intrinsic size, so without this it falls back to 300x150 and leaves a
      block of empty space beside the text — most visible when printing. */
   .banner svg{width:18px;height:18px;stroke:currentColor;flex-shrink:0;margin-top:1px;}

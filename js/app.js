@@ -1690,7 +1690,9 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
   const fuelAmount = dutyAmount;
   const oilAmount = (oils||[]).reduce((s,o)=>s+num(o.amount),0);
   dutyAmount = fuelAmount + oilAmount;
-  const cash = dutyAmount - (pay.pos||0) - (pay.upi||0) - (pay.hpCard||0) - cs.valued - expenseTotal;
+  // Stock the attendant paid for out of the drawer leaves with the cash, so the shift owes that much less.
+  const tillPurchases = dutyTillPurchaseTotal(purchases);
+  const cash = dutyAmount - (pay.pos||0) - (pay.upi||0) - (pay.hpCard||0) - cs.valued - expenseTotal - tillPurchases;
   // What the till should hold is `cash`; what was actually counted is the denomination total. When a
   // count has been entered it is the counted figure that goes into Cash in hand, because that is the
   // money the station really has — the shortfall or excess is carried to the P&L instead.
@@ -1700,7 +1702,7 @@ async function saveDutyToDb({date, dutyId, staffId, staffName, startTime, endTim
   const variance = hasCount ? counted - cash : 0;
   data.duties[id] = {
     staffId, staffName, startTime, endTime, nozzleIds, nozzles: entries, dutyAmount, fuelAmount, oilAmount, dutyLiters,
-    pay: {pos:pay.pos||0, upi:pay.upi||0, hpCard:pay.hpCard||0, bankAccountId:pay.bankAccountId||'', credit, creditValued:cs.valued, bowserDiff:cs.bowserDiff, expenses:expenseTotal,
+    pay: {pos:pay.pos||0, upi:pay.upi||0, hpCard:pay.hpCard||0, bankAccountId:pay.bankAccountId||'', credit, creditValued:cs.valued, bowserDiff:cs.bowserDiff, expenses:expenseTotal, tillPurchases,
           cash, counted: hasCount ? counted : null, variance, cashPosted},
     creditSales, expenses: expenses||[], purchases: purchases||[], oils: oils||[], cashCount, savedAt: new Date().toISOString(),
   };
@@ -2064,7 +2066,7 @@ function purchasePayOptions(sel){
     + `<option value="cash" ${sel==='cash'?'selected':''}>Paid — Cash in hand</option>`
     + state.accounts.filter(a=>a.kind==='bank' && a.active!==false).map(a=>`<option value="acct:${a.id}" ${('acct:'+a.id)===sel?'selected':''}>Paid — ${esc(a.name)}</option>`).join('');
 }
-function purchasePayLabel(k){ return !k || k==='credit' ? 'On credit' : (k==='cash' ? 'Cash in hand' : ((state.accounts.find(a=>'acct:'+a.id===k)||{}).name || k)); }
+function purchasePayLabel(k){ return !k || k==='credit' ? 'On credit' : (k==='till' ? 'Paid from till' : (k==='cash' ? 'Cash in hand' : ((state.accounts.find(a=>'acct:'+a.id===k)||{}).name || k))); }
 function supplierName(id, fallback){ const s = state.suppliers.find(x=>x.id===id); return s ? s.name : (fallback||'—'); }
 // sign +1 applies a purchase's money + stock effects, -1 reverses them.
 async function applyPurchase(item, sign){
@@ -2076,9 +2078,10 @@ async function applyPurchase(item, sign){
   const payFrom = item.payFrom || 'credit';
   if (payFrom==='credit'){
     if (item.supplierId) await applyPosting('sup:'+item.supplierId, -amt, meta);  // we owe more
-  } else {
+  } else if (payFrom!=='till'){
     await applyPosting(payFrom, -amt, meta);                                       // money out
   }
+  // 'till' posts nothing: the duty's cash takings are already net of it, the same as a till payment.
 }
 
 // A tanker often arrives mid-shift, and the attendant who signs for it is the one at the pump. The
@@ -2087,12 +2090,17 @@ async function applyPurchase(item, sign){
 // lines rather than adding a second copy.
 function newDutyPurchase(){ return {id:uid(), kind:'fuel', product:PRODUCT_KEYS[0], tankId:'', productId:'', liters:'', rate:'', supplierId:'', payFrom:'credit', ref:''}; }
 function dutyPurchaseAmount(p){ return Math.round(num(p.liters) * num(p.rate) * 100)/100; }
-// Paying a tanker out of the till would have to come off the cash the shift owes, which this form
-// works out from the meters. That path already exists under Payments from till, where a supplier can
-// be picked, so the options here are the ones that do not touch the till.
+// "till" means the attendant paid out of the cash drawer. It posts nowhere of its own: the duty's
+// cash figure is worked out from the meters and comes down by this amount instead, exactly as a
+// till payment does, so the cash it hands over matches what is actually in the drawer.
 function dutyPurchasePayOptions(sel){
   return `<option value="credit" ${sel==='credit'?'selected':''}>On credit (supplier due)</option>`
+    + `<option value="till" ${sel==='till'?'selected':''}>Paid from the till (cash)</option>`
     + state.accounts.filter(a=>a.kind==='bank' && a.active!==false).map(a=>`<option value="acct:${a.id}" ${('acct:'+a.id)===sel?'selected':''}>Paid — ${esc(a.name)}</option>`).join('');
+}
+// What a duty's own stock receipts took out of the drawer.
+function dutyTillPurchaseTotal(purchases){
+  return (purchases||[]).filter(p=>p.payFrom==='till').reduce((s,p)=>s+num(p.amount!=null?p.amount:dutyPurchaseAmount(p)),0);
 }
 function renderDutyPurchaseRows(){
   const el = $('#dfPurchaseRows'); if(!el) return;
@@ -2104,7 +2112,7 @@ function renderDutyPurchaseRows(){
       <thead><tr><th>Type</th><th>Item</th><th>Into</th><th class="num">Quantity</th><th class="num">Rate</th><th class="num">Amount</th><th>Supplier</th><th>Payment</th><th>Invoice / DO</th><th></th></tr></thead>
       <tbody id="dfPurchaseTbody"></tbody></table></div>
     <div style="margin-top:8px;"><button class="btn ghost sm" id="dfAddPurchase2">${icon('plus')} Add another</button></div>
-    <div class="hint" style="color:var(--text-faint);font-size:12px;margin-top:6px;">Anything taken in during this shift — a tanker into a tank, or oil and lubricants into stock. Stock rises and, on credit, the supplier's outstanding balance with it, the same as entering it on the Purchase tab. Something paid for out of the till belongs under <strong>Payments from till</strong> instead, against that supplier, so the cash the shift owes comes down with it.</div>`;
+    <div class="hint" style="color:var(--text-faint);font-size:12px;margin-top:6px;">Anything taken in during this shift — a tanker into a tank, or oil and lubricants into stock. Stock rises and, on credit, the supplier's outstanding balance with it, the same as entering it on the Purchase tab. Choose <strong>Paid from the till</strong> and the cash this shift hands over comes down by that much, so it matches the drawer.</div>`;
   const tbody = $('#dfPurchaseTbody');
   dutyForm.purchases.forEach(P=>{
     const oil = P.kind==='oil';
@@ -2301,7 +2309,7 @@ async function applyOilPurchase(item, sign){
   const meta = {date:item.date, narration:`Oil purchase — ${oilProductName(item.productId, item.productName)}`, journalId:item.id};
   const payFrom = item.payFrom || 'credit';
   if (payFrom==='credit'){ if (item.supplierId) await applyPosting('sup:'+item.supplierId, -amt, meta); }
-  else await applyPosting(payFrom, -amt, meta);
+  else if (payFrom!=='till') await applyPosting(payFrom, -amt, meta);
 }
 
 function renderOilSection(){
@@ -3168,6 +3176,8 @@ const REPORT_SECTIONS = [
   {id:'journal',     label:'Journal entries'},
   {id:'receipts',    label:'Receipts'},
   {id:'ledger',      label:'Ledger statements'},
+  {id:'dailysales',  label:'Daily sales sheet'},
+  {id:'dailypurchases', label:'Purchase sheet'},
 ];
 const REPORT_TYPES = [
   {id:'full',     label:'Full report — everything', sections:REPORT_SECTIONS.map(s=>s.id)},
@@ -3184,6 +3194,7 @@ const REPORT_TYPES = [
   // lists them once, with the mode and reference, which is what you check a day's takings against.
   {id:'ledger',   label:'Ledger statements', sections:['receipts','ledger']},
   {id:'balances', label:'Balances', sections:['balances','suppliers']},
+  {id:'daysheet', label:'Day sheets — sales & purchases', sections:['dailysales','dailypurchases']},
 ];
 // Both creditor reports narrow to one customer, so both offer the picker.
 function creditorPickApplies(cfg){ return cfg.report==='creditors' || cfg.report==='custtxn'; }
@@ -3276,6 +3287,39 @@ async function computeReportCached(from, to, f){
   return reportMemo.by[key];
 }
 function clearReportMemo(){ reportMemo.by = {}; reportMemo.at = 0; }
+/* ============================== DAY SHEETS ==============================
+The two sheets the station has always kept by hand: a day per row with each product's quantity,
+rate and value side by side, and the month's purchases listed under their invoice. Both are built
+from what is already recorded, so they agree with every other report by construction. */
+// Quantity, value and the rate charged, per day per product, over the report's range.
+function dailySalesGrid(r){
+  const byDay = {};
+  (r.nozzleRows||[]).forEach(x=>{
+    const d = byDay[x.date] = byDay[x.date] || {};
+    const p = d[x.product] = d[x.product] || {qty:0, amount:0, rate:0};
+    p.qty += num(x.liters); p.amount += num(x.amount);
+    if (num(x.rate)) p.rate = num(x.rate);      // the rate in force that day
+  });
+  const days = [];
+  for (let d = r.from; d <= r.to; d = addDays(d, 1)) days.push(d);
+  return days.map(date=>({date, byProduct: byDay[date] || {}}));
+}
+// Purchases under their invoice: the lines of one invoice sit together and the invoice total is
+// shown once against the first of them, as it is on the bill itself.
+function purchaseInvoiceRows(r){
+  const groups = new Map();
+  const push = (it, item, qty)=>{
+    const key = (it.ref||'') + '|' + it.date;
+    if (!groups.has(key)) groups.set(key, {date:it.date, ref:it.ref||'', lines:[], total:0});
+    const g = groups.get(key);
+    g.lines.push({item, qty, amount:num(it.amount)});
+    g.total += num(it.amount);
+  };
+  (r.purchases||[]).forEach(it=>push(it, (state.config.products[it.product]||it.product||'—'), num(it.liters)));
+  (r.oilPurchases||[]).forEach(it=>push(it, oilProductName(it.productId, it.productName), num(it.qty)));
+  return [...groups.values()].sort((a,b)=>a.date.localeCompare(b.date) || a.ref.localeCompare(b.ref));
+}
+
 async function computeReport(from, to, f){
   const months = monthsBetween(from, to);
   const inRange = (d)=> d>=from && d<=to;
@@ -3448,7 +3492,9 @@ function buildLedgerPostings(r){
   r.purchases.forEach(it=>{
     const who = `Fuel purchase — ${it.tankName||''}`;
     if (!it.payFrom || it.payFrom==='credit'){ if (it.supplierId) add('sup:'+it.supplierId, it.date, who, 0, it.amount, it.ref||''); }
-    else add(it.payFrom, it.date, who, 0, it.amount, it.ref||'');
+    // Paid out of the till: the duty's cash line is already net of it, so posting here would take
+    // the same money out of Cash in hand twice.
+    else if (it.payFrom!=='till') add(it.payFrom, it.date, who, 0, it.amount, it.ref||'');
   });
   // Oil and lubricant stock is bought the same way fuel is — on credit against a supplier, or paid
   // for out of cash or a bank. It moved those balances already; without this it reached neither
@@ -3457,7 +3503,7 @@ function buildLedgerPostings(r){
   r.oilPurchases.forEach(it=>{
     const who = `Oil purchase — ${oilProductName(it.productId, it.productName)}`;
     if (!it.payFrom || it.payFrom==='credit'){ if (it.supplierId) add('sup:'+it.supplierId, it.date, who, 0, it.amount, it.ref||'', 'Oil purchase'); }
-    else add(it.payFrom, it.date, who, 0, it.amount, it.ref||'', 'Oil purchase');
+    else if (it.payFrom!=='till') add(it.payFrom, it.date, who, 0, it.amount, it.ref||'', 'Oil purchase');
   });
   r.expenses.concat(r.payments).forEach(it=>{
     const who = expenseKind(it)==='payment' ? `Payment — ${[it.party, it.item].filter(Boolean).join(' · ')}` : `Expense — ${it.category||''}`;
@@ -4215,6 +4261,48 @@ function renderReportBody(body, cfg, r, c){
     parts.push(table('Supplier balances', [{label:'Supplier'},{label:'Phone'},{label:'Opening',num:true},{label:'Purchased (period)',num:true},{label:'Paid (period)',num:true},{label:'Adjustments',num:true},{label:'Closing',num:true}],
       rows.map(x=>[esc(x.s.name), esc(x.s.phone||'—'), money(x.opening), money(purchasedBySup[x.s.id]||0), money(paidBySup[x.s.id]||0), num(x.adj)?money(x.adj):'—', `<strong>${money(x.closing)}</strong>`]),
       ['Total','', money(t('opening')), money(Object.values(purchasedBySup).reduce((a,b)=>a+b,0)), money(Object.values(paidBySup).reduce((a,b)=>a+b,0)), money(t('adj')), money(t('closing'))]));
+  }
+  if (has('dailysales')){
+    const grid = dailySalesGrid(r);
+    const keys = PRODUCT_KEYS;
+    const tint = {p1:'var(--sheet-ms)', p2:'var(--sheet-hsd)', p3:'var(--sheet-pow)'};
+    const tot = {}; keys.forEach(k=>tot[k]={qty:0, amount:0});
+    grid.forEach(d=>keys.forEach(k=>{ const p=d.byProduct[k]; if(p){ tot[k].qty+=p.qty; tot[k].amount+=p.amount; } }));
+    const num3 = (v)=>v ? numFmt(Math.round(v*100)/100) : '—';
+    parts.push(`<div class="section-head"><h2>Sales — ${esc(rangeLabel(r.from, r.to))}</h2><span class="hint">a day per row, quantity · rate · value by product</span></div>
+      <div class="card"><div class="table-wrap"><table class="sheet">
+        <thead>
+          <tr><th rowspan="2">Date</th>${keys.map(k=>`<th colspan="3" class="num" style="background:${tint[k]};text-align:center;">${esc(state.config.products[k]||k)}</th>`).join('')}</tr>
+          <tr>${keys.map(k=>`<th class="num" style="background:${tint[k]};">Sales qty</th><th class="num" style="background:${tint[k]};">Rate</th><th class="num" style="background:${tint[k]};">Amount</th>`).join('')}</tr>
+        </thead>
+        <tbody>${grid.map(d=>`<tr>
+          <td style="white-space:nowrap;">${esc(fmtDateLabel(d.date))}</td>
+          ${keys.map(k=>{ const p=d.byProduct[k]||{qty:0,rate:0,amount:0};
+            return `<td class="num" style="background:${tint[k]};">${num3(p.qty)}</td><td class="num" style="background:${tint[k]};">${p.rate?money(p.rate):'—'}</td><td class="num" style="background:${tint[k]};">${p.amount?money(p.amount):'—'}</td>`;
+          }).join('')}
+        </tr>`).join('')}</tbody>
+        <tfoot><tr><td style="font-weight:700;">Total</td>
+          ${keys.map(k=>`<td class="num" style="font-weight:700;background:${tint[k]};">${num3(tot[k].qty)}</td><td class="num" style="background:${tint[k]};"></td><td class="num" style="font-weight:700;background:${tint[k]};">${money(tot[k].amount)}</td>`).join('')}
+        </tr></tfoot>
+      </table></div></div>`);
+  }
+  if (has('dailypurchases')){
+    const invoices = purchaseInvoiceRows(r);
+    const grand = invoices.reduce((s,g)=>s+g.total,0);
+    const body = invoices.map(g=>g.lines.map((l,i)=>`<tr>
+        ${i===0?`<td rowspan="${g.lines.length}" style="white-space:nowrap;">${esc(fmtDateLabel(g.date))}</td>
+                 <td rowspan="${g.lines.length}" class="mono">${esc(g.ref||'—')}</td>`:''}
+        <td>${esc(l.item)}</td>
+        <td class="num">${numFmt(Math.round(l.qty*100)/100)}</td>
+        <td class="num">${money(l.amount)}</td>
+        ${i===0?`<td rowspan="${g.lines.length}" class="num" style="font-weight:700;">${money(g.total)}</td>`:''}
+      </tr>`).join('')).join('');
+    parts.push(`<div class="section-head"><h2>Purchases — ${esc(rangeLabel(r.from, r.to))}</h2><span class="hint">${invoices.length} invoice${invoices.length===1?'':'s'}</span></div>
+      <div class="card"><div class="table-wrap"><table class="sheet">
+        <thead><tr><th>Date</th><th>Invoice no</th><th>Item</th><th class="num">Qty</th><th class="num">Amount</th><th class="num">Total</th></tr></thead>
+        <tbody>${body || `<tr><td colspan="6" class="empty">Nothing purchased in this period.</td></tr>`}</tbody>
+        ${invoices.length?`<tfoot><tr><td colspan="5" style="font-weight:700;">Total</td><td class="num" style="font-weight:700;">${money(grand)}</td></tr></tfoot>`:''}
+      </table></div></div>`);
   }
   if (has('ledger')){
     const pick = reportLedgerPick(cfg);
